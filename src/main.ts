@@ -217,6 +217,10 @@ let approach = ''            // 아직 승강장에 오지 않은 열차의 현�
 let fixes: Fix[] = []
 let busy = false
 let pollTimer: ReturnType<typeof setTimeout> | null = null
+// polling 루프의 세대. 멈추면 올라간다. 옛 루프는 자기 세대가 아니면 아무것도 하지 않는다.
+let pollGen = 0
+// 연속으로 열차를 못 찾은 횟수. 한 번 놓친 것으로 오류 화면을 띄우지 않는다.
+let misses = 0
 
 // 환승 1회에 걸리는 시간. 실측 전 추정값이다. 화면에는 '약'을 붙여 보여준다.
 const TRANSFER_MIN = 4
@@ -234,6 +238,7 @@ const leg = () => trip!.legs[legIndex]
 const toward = () => leg().stops[leg().stops.length - 1]
 
 function stopPolling(): void {
+  pollGen += 1
   if (pollTimer) clearTimeout(pollTimer)
   pollTimer = null
 }
@@ -390,24 +395,29 @@ async function board(a: Arrival): Promise<void> {
     at: '확인 중', from: stops[0], etaSec: a.etaSec,
   }))
   stopPolling()
-  await poll()
+  misses = 0
+  await poll(pollGen)
 }
 
 // ---------- 추적 ----------
 
-async function poll(): Promise<void> {
-  if (mode !== 'riding') return
+async function poll(gen: number): Promise<void> {
+  if (gen !== pollGen || mode !== 'riding') return
   if (!busy) {
     try {
       const me = (await positions(leg().line)).find(t => t.trainNo === train!.trainNo)
+      if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
       if (!me) {
-        log('train not in feed', train!.trainNo)
+        misses += 1
+        log('train not in feed', train!.trainNo, 'misses', misses)
       } else if (stops.includes(me.station)) {
+        misses = 0
         approach = ''
         const last = fixes[fixes.length - 1]
         if (!last || last.station !== me.station) fixes.push({ station: me.station, at: me.at })
       } else {
         // 고른 열차가 아직 승강장에 오지 않았다. 오는 중이다.
+        misses = 0
         approach = me.station
         log('train approaching', me.station)
       }
@@ -416,7 +426,7 @@ async function poll(): Promise<void> {
     }
     await render()
   }
-  if (mode === 'riding') pollTimer = setTimeout(poll, POLL_MS)
+  if (gen === pollGen && mode === 'riding') pollTimer = setTimeout(() => poll(gen), POLL_MS)
 }
 
 async function render(): Promise<void> {
@@ -426,13 +436,15 @@ async function render(): Promise<void> {
   if (!guess) {
     // 아직 타지 않았다. 열차가 오는 중이거나, 열차를 못 찾았다.
     const etaSec = Math.max(0, train!.etaSec - Math.round((now - boardedAt) / 1000))
-    if (approach) {
+    // 세 번 연속(30초) 못 찾기 전에는 오류로 단정하지 않는다.
+    // 한 번 놓친 것은 흔하다. 그때마다 오류를 띄우면 화면이 깜빡인다.
+    if (approach || misses < 3) {
       return show(S.waiting({
         now, line: leg().line, toward: train!.dest || train!.toward,
-        at: approach, from: stops[0], etaSec,
+        at: approach || '확인 중', from: stops[0], etaSec,
       }))
     }
-    return show(S.notice(Date.now(), `${train!.trainNo}번 열차를 찾지 못했습니다`, '실시간 정보에 나타나지 않습니다', '탭: 열차 다시 고르기\n  더블탭: 처음으로'))
+    return show(S.notice(now, `${train!.trainNo}번 열차를 찾지 못했습니다`, `${leg().line} 실시간 정보에 ${misses}회 연속 없습니다`, '탭: 열차 다시 고르기\n  더블탭: 처음으로'))
   }
 
   const left = stopsLeft(stops, stops[guess.index])
@@ -553,6 +565,15 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
     busy = false
   }
 })
+
+// Vite HMR은 모듈을 다시 실행한다. 정리하지 않으면 옛 타이머와 이벤트 핸들러가 살아남아
+// 여러 루프가 같은 화면을 덮어쓴다. 개발 중에만 쌓이지만 디버깅을 통째로 망친다.
+if (import.meta.hot) {
+  import.meta.hot.dispose(() => {
+    stopPolling()
+    unsubscribe()
+  })
+}
 
 const started = await bridge.createStartUpPageContainer(
   new CreateStartUpPageContainer(full(S.notice(Date.now(), 'Metro', '출발역을 찾는 중', ''))))
