@@ -12,8 +12,19 @@
 
 ## 진행 상황
 
-- Task 1 (프로젝트 뼈대): **완료** (커밋 `46d627b`)
-- `.env.local`에 `SEOUL_KEY`(일반)는 설정됨. `SEOUL_RT_KEY`(실시간)는 **비어 있음**.
+- Task 1 (프로젝트 뼈대): **완료**
+- Task 2 (역 데이터 + 좌표 + 노선 ID + 별칭): **완료**
+- `.env.local`에 `SEOUL_KEY`와 `SEOUL_RT_KEY` 모두 설정됨.
+- 워커 도메인은 기본값(`*.workers.dev`)을 쓴다. 커스텀 도메인을 붙이지 않는다.
+
+### 실측으로 확정된 사실 (Task 3 이후가 이것에 의존한다)
+
+- `updnLine`은 **읽지 않는다.** 두 API의 표기가 다르고 2호선·9호선은 극성이 반대다.
+  방향은 `trainLineNm`의 `"…방면"` 역이 `Leg.stops[1]`과 같은지로 정한다. 201건 중 201건이 파싱됐다.
+- 노선명 별칭: `경의선 → 경의중앙선`, `우이신설경전철 → 우이신설선`. `fetch-stations.mjs`가 처리한다.
+- **실시간 미지원 노선 5개**: 김포도시철도, 용인경전철, 의정부경전철, 인천선, 인천2호선.
+  역 100개다. 그래프에서 제외한다. 안 그러면 경로가 추적 불가 구간을 지난다.
+- 노선 ID 19개를 받았다. 역 699/799개가 추적 가능하다.
 
 ## Global Constraints
 
@@ -55,7 +66,7 @@ Task 3~7은 실시간 키 없이 진행할 수 있다. Task 8과 그 뒤는 키�
 
 ---
 
-### Task 2: 역 데이터에 좌표를 더한다
+### Task 2: 역 데이터에 좌표를 더한다  *(완료)*
 
 **Files:**
 - Modify: `scripts/fetch-stations.mjs`
@@ -140,7 +151,8 @@ export type Station = { name: string; line: string; branch: string; order: numbe
 export type Edge = { to: string; w: number }
 export type Coord = { name: string; lat: number; lon: number }
 export const TRANSFER_COST = 5
-export const COORDS: readonly Coord[]
+export const COORDS: readonly Coord[]        // 추적 가능한 역만
+export function supported(line: string): boolean
 export function node(line: string, name: string): string          // "2호선|강남"
 export function neighbors(n: string): Edge[]                       // 없으면 []
 export function nodesOf(name: string): string[]                    // 그 이름의 모든 노선 노드
@@ -158,7 +170,10 @@ export function lineName(subwayId: string): string                 // 없으면 
 ```ts
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { node, neighbors, nodesOf, stationAt, lineStations, transferLines, lineName, COORDS, TRANSFER_COST } from './stations.ts'
+import {
+  node, neighbors, nodesOf, stationAt, lineStations, transferLines, lineName,
+  supported, COORDS, TRANSFER_COST,
+} from './stations.ts'
 
 test('lineStations는 노선 역을 branch와 order 순으로 준다', () => {
   const two = lineStations('2호선')
@@ -205,8 +220,15 @@ test('transferLines와 lineName', () => {
   assert.equal(lineName('9999'), '')
 })
 
+test('실시간 미지원 노선은 그래프에 없다', () => {
+  assert.equal(supported('2호선'), true)
+  assert.equal(supported('인천선'), false)
+  assert.deepEqual(nodesOf('국제업무지구'), [], '인천1호선 전용역은 그래프에 없어야 합니다')
+  assert.equal(lineStations('인천선').length, 0)
+})
+
 test('좌표가 있고 고립된 역이 없다', () => {
-  assert.ok(COORDS.length > 700, `좌표 ${COORDS.length}건`)
+  assert.ok(COORDS.length > 600, `좌표 ${COORDS.length}건`)
   const names = new Set(COORDS.map(c => c.name))
   assert.ok(names.has('강남'))
   for (const line of ['1호선', '2호선', '3호선']) {
@@ -237,8 +259,20 @@ export const TRANSFER_COST = 5
 // 2호선은 순환한다. 본선의 끝과 처음을 잇는다.
 const CIRCULAR = new Set(['2호선'])
 
-const STATIONS = data.stations as Station[]
-export const COORDS = data.coords as readonly Coord[]
+const byId = new Map<string, string>(
+  (data.lines as { id: string; name: string }[]).map(l => [l.id, l.name]),
+)
+const LIVE = new Set(byId.values())
+
+// 실시간 API가 지원하지 않는 노선(인천·김포·용인·의정부 자체 노선, 역 100개)을 뺀다.
+// 남겨 두면 경로가 추적 불가 구간을 지나고, 그때 안내가 조용히 멈춘다.
+// lines가 비어 있으면(실시간 키 없이 빌드한 경우) 거르지 않는다.
+export const supported = (line: string): boolean => LIVE.size === 0 || LIVE.has(line)
+
+const STATIONS = (data.stations as Station[]).filter(s => supported(s.line))
+const LIVE_NAMES = new Set(STATIONS.map(s => s.name))
+// 추적할 수 없는 역은 GPS 후보로도 내놓지 않는다.
+export const COORDS = (data.coords as Coord[]).filter(c => LIVE_NAMES.has(c.name))
 
 export const node = (line: string, name: string): string => `${line}|${name}`
 
@@ -298,10 +332,6 @@ for (const g of byName.values()) {
   }
 }
 
-const byId = new Map<string, string>(
-  (data.lines as { id: string; name: string }[]).map(l => [l.id, l.name]),
-)
-
 export const neighbors = (n: string): Edge[] => adj.get(n) ?? []
 export const nodesOf = (name: string): string[] => (byName.get(name) ?? []).map(s => node(s.line, s.name))
 export const stationAt = (n: string): Station | undefined => byNode.get(n)
@@ -342,15 +372,12 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```ts
 export type Leg = { line: string; stops: string[] }    // stops[0] 승차역, 마지막이 하차역
 export type Plan = { from: string; to: string; legs: Leg[] }
-export type Direction = 0 | 1
 export function plan(from: string, to: string): Plan | null
-export function direction(leg: Leg): Direction | null
 export function stopsLeft(stops: string[], current: string): number   // 모르면 -1
 ```
 
-`direction`은 `updnLine` 규약이다. 0 = 상행/외선, 1 = 하행/내선.
-`stops` 앞쪽에서 같은 `branch`를 공유하는 첫 인접 쌍의 `order` 증감으로 정한다.
-그런 쌍이 없으면 `null`이다.
+**`direction()`은 만들지 않는다.** 방향은 `Leg.stops[1]`과 도착 열차의 `"…방면"`을
+비교해 정한다(spec §10.3). `updnLine`은 읽지 않는다. 노선마다 극성이 반대다.
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -358,7 +385,7 @@ export function stopsLeft(stops: string[], current: string): number   // 모르�
 ```ts
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { plan, direction, stopsLeft } from './route.ts'
+import { plan, stopsLeft } from './route.ts'
 
 const shape = (from: string, to: string) =>
   plan(from, to)?.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' ') ?? '실패'
@@ -402,13 +429,11 @@ test('plan은 알 수 없는 역에 null을 준다', () => {
   assert.equal(plan('강남', '강남'), null)
 })
 
-test('direction은 updnLine 규약을 따른다', () => {
-  const a = plan('시청', '강남')!.legs[0]
-  const b = plan('강남', '시청')!.legs[0]
-  assert.notEqual(direction(a), direction(b))
-  assert.ok(direction(a) === 0 || direction(a) === 1)
-  assert.equal(direction({ line: '2호선', stops: ['강남'] }), null)
-  assert.equal(direction({ line: '없는노선', stops: ['가', '나'] }), null)
+test('stops[1]이 방향을 가른다', () => {
+  // 방향 판정은 이 값 하나에 달려 있다(spec §10.3)
+  assert.equal(plan('강남', '교대')!.legs[0].stops[1], '교대')
+  assert.equal(plan('강남', '역삼')!.legs[0].stops[1], '역삼')
+  assert.equal(plan('시청', '강남')!.legs[0].stops[1], '을지로입구')
 })
 
 test('stopsLeft는 남은 정거장 수를 준다', () => {
@@ -429,11 +454,10 @@ Expected: FAIL — `Cannot find module './route.ts'`
 
 `src/route.ts`:
 ```ts
-import { neighbors, nodesOf, stationAt } from './stations.ts'
+import { neighbors, nodesOf } from './stations.ts'
 
 export type Leg = { line: string; stops: string[] }
 export type Plan = { from: string; to: string; legs: Leg[] }
-export type Direction = 0 | 1
 
 // 다익스트라. 출발 이름의 모든 노선 노드에서 시작해 도착 이름의 아무 노선 노드에 닿는다.
 // ponytail: 배열을 정렬해 최소값을 꺼낸다. 노드가 799개라 힙이 필요 없다.
@@ -487,18 +511,6 @@ export function plan(from: string, to: string): Plan | null {
   return { from, to, legs: legs.filter(l => l.stops.length > 1) }
 }
 
-// 0 = 상행/외선, 1 = 하행/내선. 같은 branch를 공유하는 첫 인접 쌍으로 정한다.
-export function direction(leg: Leg): Direction | null {
-  for (let i = 1; i < leg.stops.length; i++) {
-    const a = stationAt(`${leg.line}|${leg.stops[i - 1]}`)
-    const b = stationAt(`${leg.line}|${leg.stops[i]}`)
-    if (!a || !b || a.branch !== b.branch) continue
-    if (b.order === a.order) continue
-    return b.order > a.order ? 1 : 0
-  }
-  return null
-}
-
 export function stopsLeft(stops: string[], current: string): number {
   const i = stops.indexOf(current)
   return i < 0 ? -1 : stops.length - 1 - i
@@ -512,27 +524,14 @@ Expected: PASS 전체
 
 `plan('충정로','시청')`이 1정거장이 아니면 순환 간선이 빠진 것이다. Task 3으로 돌아간다.
 
-- [ ] **Step 5: 순환 방향 실측 기록**
-
-Run:
-```bash
-node --input-type=module -e "
-import { plan, direction } from './src/route.ts'
-for (const [a,b] of [['시청','강남'],['강남','시청'],['잠실','교대']])
-  console.log(a,'->',b, 'updn =', direction(plan(a,b).legs[0]))
-" 2>/dev/null || echo "node가 .ts를 못 읽으면 건너뛴다. 실기기 로그로 확인한다."
-```
-
-2호선 내선/외선이 0인지 1인지는 실시간 응답과 맞춰야 확정된다(spec §14 #2).
-Task 12에서 후보 열차가 0대로 나오면 여기를 의심한다.
-
-- [ ] **Step 6: 커밋**
+- [ ] **Step 5: 커밋**
 
 ```bash
 git add src/route.ts src/route.test.ts
-git commit -m "feat: 환승을 포함한 경로 탐색과 방향 판정
+git commit -m "feat: 환승을 포함한 경로 탐색
 
 다익스트라로 전체 네트워크 경로를 구하고 노선이 바뀌는 지점에서 구간을 나눈다.
+방향 판정은 route.ts가 하지 않는다. 도착 열차의 방면 역과 stops[1]을 비교한다.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -1112,22 +1111,28 @@ node -e "const d=require('./src/stations.json'); console.log(d.lines.map(l=>l.id
 
 `1001`~`1009` 중 빠진 것이 있으면 운행 시간대(05:30~24:00)에 다시 돌린다.
 
-- [ ] **Step 7: 이름 별칭 표를 만든다 (spec §14 #1)**
+- [ ] **Step 7: 별칭과 미지원 노선을 확인한다**
 
-역 목록과 실시간 API의 표기가 다르다. 실측으로 확인한다.
+`fetch-stations.mjs`가 이미 별칭을 처리한다(`경의선 → 경의중앙선`, `우이신설경전철 → 우이신설선`).
+결과만 확인한다.
 
 ```bash
 node -e "
 const d=require('./src/stations.json');
-const master=[...new Set(d.stations.map(s=>s.line))].sort();
-const rt=d.lines.map(l=>l.name).sort();
-console.log('역 목록에만:', master.filter(x=>!rt.includes(x)).join(' '));
-console.log('실시간에만:', rt.filter(x=>!master.includes(x)).join(' '));
+const rt=new Set(d.lines.map(l=>l.name));
+console.log('노선 ID', d.lines.length);
+console.log('ID 없는 노선:', [...new Set(d.stations.map(s=>s.line))].filter(x=>!rt.has(x)).join(' '));
 "
 ```
 
-차이가 나오면 `src/stations.ts`에 별칭 표를 넣고 `lineName`이 그것을 거치게 한다.
-차이가 없으면 아무것도 하지 않는다. **추측으로 표를 채우지 않는다.**
+Expected:
+```
+노선 ID 19
+ID 없는 노선: 김포도시철도 용인경전철 의정부경전철 인천2호선 인천선
+```
+
+이 5개는 서울시 TOPIS가 제공하지 않는다(인천·김포·용인·의정부 자체 노선).
+`stations.ts`가 그래프에서 제외한다. 목록이 달라지면 멈추고 사람에게 알린다.
 
 - [ ] **Step 8: 커밋**
 
@@ -1152,16 +1157,16 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 - Consumes: `lineName` (Task 3), `Direction` (Task 4)
 - Produces:
 ```ts
-export type TrainPos = { trainNo: string; station: string; updn: Direction; status: number; express: boolean; terminal: string; at: number }
-export type Arrival = { trainNo: string; station: string; line: string; updn: Direction; etaSec: number; msg: string; toward: string; express: boolean }
+export type TrainPos = { trainNo: string; station: string; status: number; express: boolean; terminal: string; at: number }
+export type Arrival = { trainNo: string; station: string; line: string; etaSec: number; msg: string; toward: string; express: boolean }
 export function parsePositions(body: unknown): TrainPos[]
 export function parseArrivals(body: unknown): Arrival[]
 export function positions(line: string): Promise<TrainPos[]>
 export function arrivals(station: string): Promise<Arrival[]>
 ```
 
-**함정:** 두 API가 `updnLine`을 다르게 쓴다. 위치는 `"0"`/`"1"`, 도착은 `"상행"`/`"하행"`이다.
-`parse*`가 둘 다 `Direction`(0 또는 1)으로 정규화한다.
+**`updnLine`을 읽지 않는다.** 두 API의 표기가 다르고 2호선·9호선은 극성이 반대다(spec §5.3).
+방향은 `toward`(= `"…방면"` 역)로 정한다. 이 필드의 파싱이 이 Task의 핵심이다.
 
 - [ ] **Step 1: 실패하는 테스트 작성**
 
@@ -1197,23 +1202,32 @@ test('parsePositions는 필드를 정규화한다', () => {
   const [a, b] = parsePositions(POS)
   assert.equal(a.trainNo, '2324')
   assert.equal(a.station, '신도림')
-  assert.equal(a.updn, 0)
   assert.equal(a.status, 1)
   assert.equal(a.express, false)
   assert.equal(a.terminal, '성수종착')
   assert.ok(a.at > 0)
-  assert.equal(b.updn, 1)
   assert.equal(b.express, true)
 })
 
-test('parseArrivals는 한글 updnLine을 숫자로 바꾼다', () => {
+test('parseArrivals는 방면 역을 뽑는다', () => {
   const [a, b] = parseArrivals(ARR)
-  assert.equal(a.updn, 0, '상행은 0이어야 합니다')
-  assert.equal(b.updn, 1, '하행은 1이어야 합니다')
   assert.equal(a.trainNo, '0146')
-  assert.equal(a.toward, '광운대')
+  assert.equal(a.toward, '시청', '"광운대행 - 시청방면"의 방면은 시청입니다')
+  assert.equal(b.toward, '공덕')
   assert.equal(b.etaSec, 180)
   assert.equal(b.express, true)
+})
+
+test('parseArrivals는 (급행) 꼬리와 괄호 별칭을 처리한다', () => {
+  const rows = [
+    { btrainNo: '1', statnNm: '신도림', subwayId: '1001', trainLineNm: '동인천행 - 구로방면 (급행)', btrainSttus: '급행', barvlDt: '60' },
+    { btrainNo: '2', statnNm: '사당', subwayId: '1004', trainLineNm: '불암산행 - 총신대입구(이수)방면', btrainSttus: '일반', barvlDt: '30' },
+    { btrainNo: '3', statnNm: 'X', subwayId: '1001', trainLineNm: '', btrainSttus: '일반', barvlDt: '0' },
+  ]
+  const [a, b, c] = parseArrivals({ realtimeArrivalList: rows })
+  assert.equal(a.toward, '구로')
+  assert.equal(b.toward, '총신대입구', '괄호 별칭을 떼야 역 목록과 맞습니다')
+  assert.equal(c.toward, '')
 })
 
 test('파서는 빈 응답과 오류 응답에 빈 배열을 준다', () => {
@@ -1234,20 +1248,27 @@ Expected: FAIL — `Cannot find module './api.ts'`
 `src/api.ts`:
 ```ts
 import { lineName } from './stations.ts'
-import type { Direction } from './route.ts'
 
 // 워커가 http 전용 원 API를 https로 중계한다. 키는 워커에 있다.
 const BASE = import.meta.env.VITE_API_BASE ?? ''
 const TOKEN = import.meta.env.VITE_API_TOKEN ?? ''
 
 export type TrainPos = {
-  trainNo: string; station: string; updn: Direction
+  trainNo: string; station: string
   status: number; express: boolean; terminal: string; at: number
 }
 
 export type Arrival = {
-  trainNo: string; station: string; line: string; updn: Direction
+  trainNo: string; station: string; line: string
   etaSec: number; msg: string; toward: string; express: boolean
+}
+
+// "광운대행 - 시청방면"        -> "시청"
+// "동인천행 - 구로방면 (급행)"  -> "구로"   ($ 앵커를 쓰면 (급행)에서 실패한다
+// "불암산행 - 총신대입구(이수)방면" -> "총신대입구"  (괄호 별칭을 떼야 역 목록과 맞는다)
+export const towardOf = (trainLineNm: string): string => {
+  const m = /-\s*(.+?)방면/.exec(trainLineNm ?? '')
+  return m ? m[1].replace(/\(.*?\)/g, '').trim() : ''
 }
 
 // "2026-09-20 18:38:29" -> epoch ms. 기기와 서버가 같은 KST를 쓴다고 본다.
@@ -1261,12 +1282,10 @@ const rows = (body: unknown, key: string): Record<string, string>[] => {
   return Array.isArray(list) ? (list as Record<string, string>[]) : []
 }
 
-// 반환 타입을 명시한다. 없으면 updn이 0|1 대신 number로 넓어질 수 있다.
 export function parsePositions(body: unknown): TrainPos[] {
   return rows(body, 'realtimePositionList').map((r): TrainPos => ({
     trainNo: String(r.trainNo ?? ''),
     station: String(r.statnNm ?? ''),
-    updn: r.updnLine === '1' ? 1 : 0,
     status: Number(r.trainSttus ?? 0),
     express: r.directAt === '1',
     terminal: String(r.statnTnm ?? ''),
@@ -1279,12 +1298,9 @@ export function parseArrivals(body: unknown): Arrival[] {
     trainNo: String(r.btrainNo ?? ''),
     station: String(r.statnNm ?? ''),
     line: lineName(String(r.subwayId ?? '')),
-    // 도착 API는 updnLine을 한글로 준다. 위치 API는 "0"/"1"로 준다.
-    updn: String(r.updnLine).startsWith('하') || String(r.updnLine).includes('내선') ? 1 : 0,
     etaSec: Number(r.barvlDt ?? 0),
     msg: String(r.arvlMsg2 ?? ''),
-    // "광운대행 - 시청방면" -> "광운대"
-    toward: String(r.trainLineNm ?? '').split('행')[0].trim(),
+    toward: towardOf(String(r.trainLineNm ?? '')),
     express: String(r.btrainSttus ?? '').includes('급행'),
   }))
 }
@@ -1322,7 +1338,8 @@ Expected: PASS 전체, 빌드 성공
 git add src/api.ts src/api.test.ts
 git commit -m "feat: 워커 호출과 응답 정규화
 
-두 API가 updnLine을 다르게 쓴다. 위치는 0/1, 도착은 상행/하행이다.
+updnLine은 읽지 않는다. 노선마다 극성이 반대다.
+방향은 trainLineNm의 방면 역으로 정한다. (급행) 꼬리와 괄호 별칭을 처리한다.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -1588,7 +1605,8 @@ async function startTrip(dest: string): Promise<void> {
   if (!trip || !trip.legs.length) {
     mode = 'dest'
     rows = []
-    return showFull(`경로를 찾지 못했습니다.\n${origin} → ${dest}\n역 이름을 확인하세요.\n탭: 도착지 다시 고르기`)
+    // 실시간 미지원 노선(인천·김포·용인·의정부)의 역은 그래프에 없어서 여기로 온다
+    return showFull(`경로를 찾지 못했습니다.\n${origin} → ${dest}\n역 이름과 노선을 확인하세요.\n탭: 도착지 다시 고르기`)
   }
   await rememberOrigin(origin)
   await showFull(planScreen(trip))
@@ -1735,7 +1753,6 @@ Task 11의 자리표시자 `startLeg`를 지우고 아래로 바꾼다.
 
 ```ts
 import { arrivals, type Arrival } from './api.ts'
-import { direction } from './route.ts'
 
 let legIndex = 0
 let stops: string[] = []
@@ -1755,15 +1772,18 @@ async function showPick(): Promise<void> {
   mode = 'pick'
   const from = stops[0]
   await showFull(`${from}\n${leg().line} 도착 열차를 확인하는 중...`)
-  const want = direction(leg())
   const all = await arrivals(from)
-  // 같은 노선, 같은 방향만 남긴다. 옆 선로 열차를 잡으면 안내가 통째로 틀린다.
-  // 방향을 정할 수 없으면 거르지 않는다. 잘못 거르는 것보다 한 번 더 묻는 편이 안전하다.
-  candidates = all
-    .filter(a => a.trainNo && a.line === leg().line && (want === null || a.updn === want))
+  const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
+  // 방향은 "…방면" 역이 다음 역과 같은지로 가른다(spec §10.3).
+  // "…방면"은 급행이든 일반이든 인접한 다음 역이다. updnLine은 읽지 않는다.
+  const next = stops[1]
+  const sameWay = sameLine.filter(a => a.toward === next)
+  // 이름 표기가 어긋나 0대가 되면 거르지 않는다.
+  // "도착 정보 없음"으로 막히는 것보다 한 번 더 묻는 편이 안전하다.
+  candidates = (sameWay.length ? sameWay : sameLine)
     .sort((a, b) => a.etaSec - b.etaSec)
     .slice(0, 18)
-  log('candidates', candidates.length, 'of', all.length, 'want', want, 'line', leg().line)
+  log('candidates', candidates.length, 'sameWay', sameWay.length, 'line', sameLine.length, 'of', all.length, 'next', next)
 
   if (!candidates.length) {
     rows = []
@@ -1821,10 +1841,14 @@ Run: `npm run build && npm run dev`
 Expected: 도착지를 탭하면 열차 목록이 뜬다.
 `[device] candidates 2 of 18 want 1 line 2호선`이 찍힌다.
 
-**여기서 `candidates 0 of N`이 나오면 원인이 셋 중 하나다.**
-1. `want`가 틀렸다 → spec §14 #2. `want null`로 임시로 바꿔 전체를 보고 실제 `updn`을 확인한다.
-2. `a.line`이 빈 문자열이다 → `stations.json`의 `lines`에 그 노선이 빠졌다. Task 8 Step 6으로 돌아간다.
-3. 역 이름 표기가 다르다 → spec §14 #1. `all`의 `station` 값을 로그로 찍어 비교한다.
+로그를 이렇게 읽는다. `candidates 2 sameWay 2 line 4 of 18 next 교대`
+= 그 역 도착 18건 중 그 노선이 4건, 그중 교대방면이 2건이다.
+
+**`sameWay 0`이면** 방면 이름이 `stops[1]`과 안 맞는 것이다. 후보를 거르지 않고 넘어가므로
+화면은 동작한다. `all`의 `toward` 값을 로그로 찍어 어느 표기가 다른지 확인한다.
+
+**`line 0`이면** `a.line`이 빈 문자열이거나 다른 것이다.
+`stations.json`의 `lines`에 그 노선이 빠졌다. Task 8 Step 6으로 돌아간다.
 
 - [ ] **Step 4: 커밋**
 
@@ -1832,7 +1856,8 @@ Expected: 도착지를 탭하면 열차 목록이 뜬다.
 git add src/main.ts
 git commit -m "feat: 승강장에서 탈 열차 고르기
 
-같은 노선 같은 방향만 남긴다. 방향을 못 정하면 거르지 않는다.
+방향은 도착 열차의 방면 역이 다음 역과 같은지로 가른다.
+일치가 0대면 거르지 않는다. 막히는 것보다 한 번 더 묻는 편이 안전하다.
 
 Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 ```
@@ -2075,9 +2100,14 @@ Co-Authored-By: Claude Opus 5 (1M context) <noreply@anthropic.com>"
 
 spec §14와 같다.
 
-1. 두 소스의 이름 표기 차이. Task 8 Step 7에서 실측한다.
-2. 2호선 내선/외선의 `updnLine` 값. Task 12 Step 3에서 실측한다.
-3. 서울 API의 rate limit. `poll failed`가 잦으면 `POLL_MS`를 15초로 올린다.
-4. 코레일 직결 구간의 `trainNo` 연속성. 끊기면 그때 자동 재탐색을 넣는다.
-5. `.ehpk` 페이지의 scheme. 워커가 https이므로 막힐 이유가 없지만 배포 때 확인한다.
-6. 이미 탑승한 상태로 앱을 여는 경우. 1차는 승강장에서 시작하는 것만 지원한다.
+1. 서울 API의 rate limit. `poll failed`가 잦으면 `POLL_MS`를 15초로 올린다.
+2. 코레일 직결 구간의 `trainNo` 연속성. 끊기면 그때 자동 재탐색을 넣는다.
+3. `.ehpk` 페이지의 scheme. 워커가 https이므로 막힐 이유가 없지만 배포 때 확인한다.
+4. 이미 탑승한 상태로 앱을 여는 경우. 1차는 승강장에서 시작하는 것만 지원한다.
+5. 급행을 타면 "하차까지 N 정거장"이 물리적 역 수라 실제 정차 횟수보다 많다.
+   남은 시간은 관측 속도로 계산하므로 영향이 없다. 목록에 `급행`을 표시한다.
+
+### 해결됨 (2026-09-20 실측)
+- 노선명 별칭 → `경의선 → 경의중앙선`, `우이신설경전철 → 우이신설선`. 스크립트가 처리한다.
+- 실시간 미지원 노선 5개 → 그래프에서 제외한다.
+- 2호선·9호선의 `updnLine` 극성 → `updnLine`을 아예 읽지 않는다. 방면 매칭으로 바꿨다.

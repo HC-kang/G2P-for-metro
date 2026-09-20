@@ -17,8 +17,22 @@ const json = async url => {
   try { return JSON.parse(body) } catch { throw new Error(body.slice(0, 200)) }
 }
 
-// "01호선" -> "1호선". 그 밖의 이름("경의선")은 그대로 둔다.
-const apiLineName = raw => raw.replace(/^0?(\d+)호선$/, '$1호선')
+// 역 목록과 실시간 API의 노선명이 다르다. 실측으로 만든 표다(2026-09-20).
+// 실시간 API에 후보 이름을 직접 던져 200을 준 것만 넣었다. 추측하지 않았다.
+const LINE_ALIAS = {
+  경의선: '경의중앙선',        // id 1063
+  우이신설경전철: '우이신설선', // id 1092
+}
+
+// 실시간 API가 지원하지 않는 노선. 인천·김포·용인·의정부 자체 노선이다.
+// 서울시 TOPIS 데이터라서 없다. 이 구간은 열차를 추적할 수 없다.
+const NO_REALTIME = ['김포도시철도', '용인경전철', '의정부경전철', '인천선', '인천2호선']
+
+// "01호선" -> "1호선". 그 밖은 별칭 표를 거친다.
+const apiLineName = raw => {
+  const n = raw.replace(/^0?(\d+)호선$/, '$1호선')
+  return LINE_ALIAS[n] ?? n
+}
 
 // FR_CODE를 지선(branch)과 순서(order)로 쪼갠다.
 //   "142"    -> branch ''      order 142  base null   (본선)
@@ -67,6 +81,7 @@ if (!RT_KEY) {
   console.warn('SEOUL_RT_KEY가 없습니다. lines를 비운 채로 저장합니다. 실시간 키를 받은 뒤 다시 돌리세요.')
 } else {
   for (const name of lineNames) {
+    if (NO_REALTIME.includes(name)) continue
     const url = `http://swopenapi.seoul.go.kr/api/subway/${RT_KEY}/json/realtimePosition/0/1/${encodeURIComponent(name)}`
     try {
       const row = (await json(url)).realtimePositionList?.[0]
@@ -76,6 +91,11 @@ if (!RT_KEY) {
       console.warn(`호출 실패, 건너뜀: ${name} (${e.message})`)
     }
   }
+  // 막차 뒤에 돌리면 lines가 비어 버린다. 주요 노선이 빠지면 멈춘다.
+  const must = ['1호선', '2호선', '3호선', '4호선', '5호선', '6호선', '7호선', '8호선', '9호선']
+  const got = new Set(lines.map(l => l.name))
+  const gone = must.filter(m => !got.has(m))
+  if (gone.length) throw new Error(`주요 노선 ID가 빠졌습니다: ${gone.join(' ')}. 운행 시간대에 다시 돌리세요.`)
 }
 
 writeFileSync('src/stations.json', JSON.stringify({ lines, stations }))
