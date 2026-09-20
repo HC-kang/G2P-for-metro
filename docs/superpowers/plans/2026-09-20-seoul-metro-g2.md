@@ -847,7 +847,8 @@ test('ridingBoxes는 세 상자를 채우고 한도를 지킨다', () => {
     pathLen: 7, index: 3, estimated: 0,
     transfer: { station: '교대', line: '3호선', stopsAway: 2 },
   })
-  assert.ok(b.top.includes('역삼'))
+  // top은 wide()로 자간을 넣으므로 '역삼'이 '역 삼'이 된다. 공백을 지우고 본다.
+  assert.ok(b.top.replace(/ /g, '').includes('역삼'), b.top)
   assert.ok(b.mid.includes('4') && b.mid.includes('강남'))
   assert.ok(b.bottom.includes('교대') && b.bottom.includes('3호선'))
   assert.ok(bytes(b.top + b.mid + b.bottom) <= PAGE_BYTES)
