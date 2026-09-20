@@ -1,0 +1,10 @@
+name = "metro"
+main = "index.js"
+compatibility_date = "2026-09-01"
+
+# 커스텀 도메인은 쓰지 않는다. 기본 *.workers.dev 주소를 쓴다.
+workers_dev = true
+
+# secret은 파일에 두지 않는다. wrangler secret put 으로 넣는다.
+#   npx wrangler secret put SEOUL_RT_KEY
+#   npx wrangler secret put METRO_TOKEN
