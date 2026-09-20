@@ -85,8 +85,23 @@ GET http://openapi.seoul.go.kr:8088/{KEY}/json/SearchSTNBySubwayLineInfo/1/800/
 
 ```
 seoulKey : string
-routes   : { name, from, to, line, via? }[]   // 최대 5개
+routes   : Route[]                       // 최대 5개
 ```
+
+```ts
+type Route = {
+  name: string          // 사용자가 붙인 이름. 예: "출근"
+  legs: Leg[]           // 환승 없으면 1개, 1회 환승이면 2개
+}
+type Leg = {
+  line: string          // realtimePosition이 받는 노선명. 예: "2호선"
+  from: string          // 역 이름. 예: "잠실"
+  to: string            // 이 구간의 하차역. 환승역이거나 최종 목적지다
+}
+```
+
+방향(`updnLine`)은 저장하지 않는다. 각 `Leg`의 `from`과 `to`를 역 순서표에서
+비교해 그때그때 계산한다. 저장값이 역 순서표와 어긋날 여지를 없앤다.
 
 ## 6. 상태 기계
 
@@ -103,6 +118,9 @@ IDLE ──탭──▶ PICK_TRAIN ──탭──▶ RIDING ──▶ ARRIVED
 | `PICK_TRAIN` | 방향이 맞는 도착 예정 열차 목록 | 10초 (`realtimeStationArrival`) |
 | `RIDING` | 박스 3개 동행 화면 | 10초 (`realtimePosition`) |
 | `TRANSFER` | 환승 안내 전체 화면 | 없음 |
+
+`RIDING`은 `Leg` 하나를 담당한다. `Leg`의 `to`에 닿았을 때, 남은 `Leg`가 있으면
+`TRANSFER`로, 없으면 `ARRIVED`로 간다.
 | `ARRIVED` | 도착 화면 | 없음 |
 
 `IDLE`에서 더블탭은 `shutDownPageContainer(1)`이다(tiro 확인).
@@ -184,7 +202,7 @@ IDLE ──탭──▶ PICK_TRAIN ──탭──▶ RIDING ──▶ ARRIVED
 ## 8. 알고리즘
 
 ### 8.1 탑승 열차 잡기
-1. 경로의 출발역과 도착역으로 방향(`updnLine`)을 계산한다.
+1. 현재 `Leg`의 `from`과 `to`로 방향(`updnLine`)을 계산한다.
 2. `realtimeStationArrival`을 호출한다. 방향이 맞는 열차만 남긴다.
 3. 후보가 1대면 바로 `RIDING`으로 간다. 2대 이상이면 목록으로 되묻는다.
 4. 후보가 0대면 "도착 정보 없음 · 탭하면 다시 확인"을 표시한다.
