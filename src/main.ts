@@ -5,7 +5,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines } from './stations.ts'
-import { plan, locate, paceMs, stopsLeft, type Plan, type Fix } from './route.ts'
+import { plan, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
 import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -52,7 +52,7 @@ async function show(content: string): Promise<void> {
   log('show', ok, 'bytes', S.bytes(content))
   if (!ok) {
     await bridge.rebuildPageContainer(new RebuildPageContainer(
-      full(S.notice('화면을 표시하지 못했습니다', '', '탭: 처음으로 · 더블탭: 종료'))))
+      full(S.notice(Date.now(), '화면을 표시하지 못했습니다', '', '탭: 처음으로\n  더블탭: 종료'))))
   }
 }
 
@@ -91,6 +91,13 @@ const noteEl = $('#note')
 const hitsEl = $('#hits')
 const qEl = $<HTMLInputElement>('#q')
 const goEl = $<HTMLButtonElement>('#go')
+
+// G2 목록용 노선 표기. 항목 한도는 62바이트다.
+// 노선 2개까지는 전체 이름이 들어간다. 3개 이상인 역 4개만 짧은 이름을 쓴다.
+const lineLabel = (name: string): string => {
+  const lines = transferLines(name)
+  return lines.length <= 2 ? lines.join('·') : lines.map(lineShort).join('·')
+}
 
 const badge = (line: string) => {
   const el = document.createElement('span')
@@ -211,6 +218,16 @@ let fixes: Fix[] = []
 let busy = false
 let pollTimer: ReturnType<typeof setTimeout> | null = null
 
+// 환승 1회에 걸리는 시간. 실측 전 추정값이다. 화면에는 '약'을 붙여 보여준다.
+const TRANSFER_MIN = 4
+const tripStops = (p: Plan) => p.legs.reduce((n, l) => n + l.stops.length - 1, 0)
+const tripMinutes = (p: Plan, pace = DEFAULT_PACE_MS) =>
+  Math.round((tripStops(p) * pace) / 60_000 + (p.legs.length - 1) * TRANSFER_MIN)
+// 남은 구간만 센다. 환승 화면과 주행 화면의 최종 도착 시각에 쓴다.
+const restMinutes = (from: number, pace = DEFAULT_PACE_MS) =>
+  Math.round((trip!.legs.slice(from).reduce((n, l) => n + l.stops.length - 1, 0) * pace) / 60_000
+    + (trip!.legs.length - 1 - from) * TRANSFER_MIN)
+
 const GPS_TIMEOUT_MS = 5000
 const POLL_MS = 10_000
 const leg = () => trip!.legs[legIndex]
@@ -250,19 +267,18 @@ async function showOrigin(): Promise<void> {
   trip = null
   train = null
   stopPolling()
-  await show(S.notice('출발역을 찾는 중', '', '위치를 확인하고 있습니다'))
+  await show(S.notice(Date.now(), '출발역을 찾는 중', '', '위치를 확인하고 있습니다'))
   const near = await nearbyStations()
   const names = [...near.map(n => n.name), ...recents.filter(r => !near.some(n => n.name === r))]
   if (!names.length) {
     rows = []
-    return show(S.notice('출발역을 찾지 못했습니다', '폰에서 자주 가는 곳을 먼저 넣으세요', '탭: 다시 시도 · 더블탭: 종료'))
+    return show(S.notice(Date.now(), '출발역을 찾지 못했습니다', '폰에서 자주 가는 곳을 먼저 넣으세요', '탭: 다시 시도\n  더블탭: 종료'))
   }
   const meters = new Map(near.map(n => [n.name, n.meters]))
   rows = names
   const items = S.rows(names, n => {
     const m = meters.get(n)
-    const lines = transferLines(n).map(lineShort).join('·')
-    return m === undefined ? `${lines}  최근` : `${lines}  ${m}m`
+    return m === undefined ? `${lineLabel(n)}  최근` : `${lineLabel(n)}  ${m}m`
   })
   if (!near.length) {
     // 안내행은 고를 수 없어야 한다. rows의 빈 문자열이 onTap을 다시 시도로 보낸다.
@@ -271,7 +287,7 @@ async function showOrigin(): Promise<void> {
   }
   if (!(await showList(items))) {
     rows = []
-    await show(S.notice('목록을 표시하지 못했습니다', '', '탭: 다시 시도 · 더블탭: 종료'))
+    await show(S.notice(Date.now(), '목록을 표시하지 못했습니다', '', '탭: 다시 시도\n  더블탭: 종료'))
   }
 }
 
@@ -282,18 +298,18 @@ async function showDest(): Promise<void> {
   const usable = dests.filter(d => d !== origin && plan(origin, d))
   if (!usable.length) {
     rows = []
-    return show(S.notice('갈 수 있는 곳이 없습니다', `${origin}에서 이어지는 경로를 찾지 못했습니다`, '탭: 출발역 다시 고르기'))
+    return show(S.notice(Date.now(), '갈 수 있는 곳이 없습니다', `${origin}에서 이어지는 경로를 찾지 못했습니다`, '탭: 출발역 다시 고르기'))
   }
   rows = usable
   // 정거장 수와 환승 횟수를 함께 보여준다. 무엇을 고를지 여기서 정해진다.
   const items = S.rows(usable, d => {
     const p = plan(origin, d)!
-    const n = p.legs.reduce((sum, l) => sum + l.stops.length - 1, 0)
-    return p.legs.length > 1 ? `${n}정거장 · 환승 ${p.legs.length - 1}` : `${n}정거장`
+    const tail = p.legs.length > 1 ? ` · 환승 ${p.legs.length - 1}` : ''
+    return `${tripStops(p)}정거장 · 약 ${tripMinutes(p)}분${tail}`
   })
   if (!(await showList(items))) {
     rows = []
-    await show(S.notice('목록을 표시하지 못했습니다', '', '탭: 출발역 다시 고르기'))
+    await show(S.notice(Date.now(), '목록을 표시하지 못했습니다', '', '탭: 출발역 다시 고르기'))
   }
 }
 
@@ -302,11 +318,14 @@ async function startTrip(dest: string): Promise<void> {
   if (!trip || !trip.legs.length) {
     mode = 'dest'
     rows = []
-    return show(S.notice('경로를 찾지 못했습니다', `${origin} → ${dest}`, '탭: 도착지 다시 고르기'))
+    return show(S.notice(Date.now(), '경로를 찾지 못했습니다', `${origin} → ${dest}`, '탭: 도착지 다시 고르기'))
   }
   await rememberOrigin(origin)
   log('plan', origin, dest, trip.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' '))
-  await show(S.route(trip))
+  await show(S.route({
+    now: Date.now(), from: trip.from, to: trip.to, legs: trip.legs,
+    stops: tripStops(trip), minutes: tripMinutes(trip),
+  }))
   await startLeg(0)
 }
 
@@ -320,9 +339,13 @@ async function startLeg(i: number): Promise<void> {
   await showPick()
 }
 
-async function showPick(): Promise<void> {
+// autoBoard: 후보가 1대면 바로 태운다. 사용자가 "다시 고르기"로 왔을 때는 끈다.
+// 켜 둔 채로 다시 고르면 같은 열차를 또 태워서 아무 일도 없는 것처럼 보인다.
+async function showPick(autoBoard = true): Promise<void> {
   mode = 'pick'
   const from = stops[0]
+  // 조회에 시간이 걸린다. 탭이 먹혔다는 것을 먼저 보여준다.
+  await show(S.notice(Date.now(), `${from}`, `${leg().line} 도착 열차를 확인합니다`, '잠시만 기다리세요'))
   const all = await arrivals(from)
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
   // 방향은 "…방면" 역이 다음 역과 같은지로 가른다.
@@ -335,9 +358,11 @@ async function showPick(): Promise<void> {
 
   if (!candidates.length) {
     rows = []
-    return show(S.notice(`${from}에 오는 열차가 없습니다`, `${toward()} 방면 도착 정보가 비어 있습니다`, '탭: 다시 확인 · 더블탭: 처음으로'))
+    return show(S.notice(Date.now(), `${from}에 오는 열차가 없습니다`, `${toward()} 방면 도착 정보가 비어 있습니다`, '탭: 다시 확인\n  더블탭: 처음으로'))
   }
-  if (candidates.length === 1) return board(candidates[0])
+  // 후보가 하나뿐이어도 "다시 고르기"로 온 경우에는 목록을 보여준다.
+  // 자동으로 같은 열차를 다시 태우면 탭이 먹히지 않은 것처럼 보인다.
+  if (candidates.length === 1 && autoBoard) return board(candidates[0])
 
   picks = candidates
   rows = candidates.map(a => a.trainNo)
@@ -347,7 +372,7 @@ async function showPick(): Promise<void> {
   }))
   if (!(await showList(items))) {
     rows = []
-    await show(S.notice('열차 목록을 표시하지 못했습니다', '', '탭: 다시 확인'))
+    await show(S.notice(Date.now(), '열차 목록을 표시하지 못했습니다', '', '탭: 다시 확인'))
   }
 }
 
@@ -361,7 +386,7 @@ async function board(a: Arrival): Promise<void> {
   mode = 'riding'
   log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
   await show(S.waiting({
-    line: leg().line, toward: a.dest || a.toward, trainNo: a.trainNo,
+    now: Date.now(), line: leg().line, toward: a.dest || a.toward,
     at: '확인 중', from: stops[0], etaSec: a.etaSec,
   }))
   stopPolling()
@@ -403,11 +428,11 @@ async function render(): Promise<void> {
     const etaSec = Math.max(0, train!.etaSec - Math.round((now - boardedAt) / 1000))
     if (approach) {
       return show(S.waiting({
-        line: leg().line, toward: train!.dest || train!.toward, trainNo: train!.trainNo,
+        now, line: leg().line, toward: train!.dest || train!.toward,
         at: approach, from: stops[0], etaSec,
       }))
     }
-    return show(S.notice(`${train!.trainNo}번 열차를 찾지 못했습니다`, '실시간 정보에 나타나지 않습니다', '탭: 열차 다시 고르기'))
+    return show(S.notice(Date.now(), `${train!.trainNo}번 열차를 찾지 못했습니다`, '실시간 정보에 나타나지 않습니다', '탭: 열차 다시 고르기\n  더블탭: 처음으로'))
   }
 
   const left = stopsLeft(stops, stops[guess.index])
@@ -419,7 +444,7 @@ async function render(): Promise<void> {
 
   if (guess.stale) {
     return show(S.lost({
-      last: lastFix.station,
+      now, last: lastFix.station,
       agoSec: Math.round((now - lastFix.at) / 1000),
       guess: stops[guess.index],
       dest, stopsLeft: left,
@@ -429,19 +454,26 @@ async function render(): Promise<void> {
 
   if (left <= 2) {
     return show(S.alight({
-      stopsLeft: left, dest, next: stops[guess.index + 1],
+      now, stopsLeft: left, dest, next: stops[guess.index + 1],
       minutes: Math.max(1, Math.round((pace * left) / 60_000)),
     }))
   }
 
   const nextLeg = trip!.legs[legIndex + 1]
   await show(S.riding({
-    line: leg().line,
+    now, line: leg().line,
     toward: train!.dest || train!.toward,
     next: stops[guess.index + 1],
-    dest, stopsLeft: left, paceMs: pace,
+    legDest: dest, stopsLeft: left, paceMs: pace,
     pathLen: stops.length, index: guess.index, estimated: guess.estimated,
-    transfer: nextLeg ? { station: dest, line: nextLeg.line } : undefined,
+    transfer: nextLeg
+      ? {
+          line: nextLeg.line,
+          finalDest: trip!.to,
+          // 남은 시간은 이번 구간의 관측 속도로 센다. 지금 타고 있는 열차의 실제 속도다.
+          finalMinutes: Math.round((left * pace) / 60_000) + TRANSFER_MIN + restMinutes(legIndex + 1, pace),
+        }
+      : undefined,
   }))
 }
 
@@ -452,13 +484,16 @@ async function arrive(): Promise<void> {
   if (nextLeg) {
     mode = 'transfer'
     return show(S.transfer({
+      now: Date.now(),
       station: stops[stops.length - 1],
       from: leg().line, to: nextLeg.line,
       toward: nextLeg.stops[nextLeg.stops.length - 1],
+      rest: trip!.legs.slice(legIndex + 1).reduce((n, l) => n + l.stops.length - 1, 0),
+      minutes: restMinutes(legIndex + 1),
     }))
   }
   mode = 'arrived'
-  await show(S.arrived(stops[stops.length - 1]))
+  await show(S.arrived(Date.now(), stops[stops.length - 1]))
 }
 
 // ---------- 이벤트 ----------
@@ -472,7 +507,7 @@ function eventTypeOf(e?: { eventType?: OsEventTypeList }): OsEventTypeList | nul
 async function onTap(index: number): Promise<void> {
   if (mode === 'origin') {
     const pick = rows[index]
-    if (!pick) return showOrigin()
+    if (!pick) return showOrigin()   // 자 화면과 실패 화면은 rows가 비어 있다
     origin = pick
     return showDest()
   }
@@ -485,7 +520,8 @@ async function onTap(index: number): Promise<void> {
     const a = picks.find(p => p.trainNo === rows[index])
     return a ? board(a) : showPick()          // 실패 화면에서 탭하면 다시 확인
   }
-  if (mode === 'riding') { stopPolling(); return showPick() }   // 엉뚱한 열차를 잡았을 때
+  // 엉뚱한 열차를 잡았을 때. 자동 탑승을 끄고 목록을 보여준다.
+  if (mode === 'riding') { stopPolling(); return showPick(false) }
   if (mode === 'transfer') return startLeg(legIndex + 1)
   return showOrigin()                                            // arrived
 }
@@ -512,13 +548,29 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
     stopPolling()
     mode = 'origin'
     rows = []
-    await show(S.notice('오류', String(e), '탭: 처음으로 · 더블탭: 종료'))
+    await show(S.notice(Date.now(), '오류', String(e), '탭: 처음으로\n  더블탭: 종료'))
   } finally {
     busy = false
   }
 })
 
+// 개발 중에만 나오는 자. G2 화면의 실제 폭과 줄 수를 재려고 둔다.
+// 이 값을 모르면 화면이 조용히 접힌다. 가로줄 34개(68칸)를 넣었다가 겪었다.
+const RULER = [
+  '1234567890123456789012345678901234567890',
+  '가나다라마바사아자차카타파하거너더러머버',
+  '●●●●●●●●●●●●●●●●●●●●',
+  '3   1234567890123456789012345678901234567890',
+  '4',
+  '5', '6', '7', '8', '9', '10', '11', '12', '13', '14',
+].join('\n')
+
 const started = await bridge.createStartUpPageContainer(
-  new CreateStartUpPageContainer(full(S.notice('Metro', '출발역을 찾는 중', ''))))
+  new CreateStartUpPageContainer(full(S.notice(Date.now(), 'Metro', '출발역을 찾는 중', ''))))
 log('startup', started, location.href)
-await showOrigin()
+if (import.meta.env?.DEV && !sessionStorage.getItem('ruler')) {
+  sessionStorage.setItem('ruler', '1')
+  await show(RULER)
+} else {
+  await showOrigin()
+}
