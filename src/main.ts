@@ -554,23 +554,7 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
   }
 })
 
-// 개발 중에만 나오는 자. G2 화면의 실제 폭과 줄 수를 재려고 둔다.
-// 이 값을 모르면 화면이 조용히 접힌다. 가로줄 34개(68칸)를 넣었다가 겪었다.
-const RULER = [
-  '1234567890123456789012345678901234567890',
-  '가나다라마바사아자차카타파하거너더러머버',
-  '●●●●●●●●●●●●●●●●●●●●',
-  '3   1234567890123456789012345678901234567890',
-  '4',
-  '5', '6', '7', '8', '9', '10', '11', '12', '13', '14',
-].join('\n')
-
 const started = await bridge.createStartUpPageContainer(
   new CreateStartUpPageContainer(full(S.notice(Date.now(), 'Metro', '출발역을 찾는 중', ''))))
 log('startup', started, location.href)
-if (import.meta.env?.DEV && !sessionStorage.getItem('ruler')) {
-  sessionStorage.setItem('ruler', '1')
-  await show(RULER)
-} else {
-  await showOrigin()
-}
+await showOrigin()
