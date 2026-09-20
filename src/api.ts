@@ -64,6 +64,18 @@ export function parseArrivals(body: unknown): Arrival[] {
   }))
 }
 
+// 기기 로그. dev 서버는 같은 Wi-Fi에서만 받으므로 지하철에서는 끊긴다.
+// 워커로 보내면 `npx wrangler tail`로 어디서든 본다. 실패해도 앱을 방해하지 않는다.
+export const remoteLog = (msg: string): void => {
+  if (!BASE) return
+  void fetch(`${BASE}/log`, {
+    method: 'POST',
+    headers: { 'x-metro-token': TOKEN, 'Content-Type': 'text/plain' },
+    body: msg.slice(0, 500),
+    keepalive: true,
+  }).catch(() => {})
+}
+
 const get = async (path: string): Promise<unknown> => {
   const res = await fetch(`${BASE}${path}`, { headers: { 'x-metro-token': TOKEN } })
   if (res.status === 403) throw new Error('앱 설정이 서버와 맞지 않습니다')

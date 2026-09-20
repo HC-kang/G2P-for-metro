@@ -7,12 +7,15 @@ import {
 import { COORDS, NAMES, transferLines } from './stations.ts'
 import { plan, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
 import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
-import { arrivals, positions, type Arrival } from './api.ts'
+import { arrivals, positions, remoteLog, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 
 const log = (...a: unknown[]) => {
-  if (import.meta.env?.DEV) navigator.sendBeacon('/__log', a.map(String).join(' '))
+  const msg = a.map(String).join(' ')
+  // 같은 Wi-Fi에 있을 때는 dev server 터미널에, 아닐 때도 볼 수 있게 워커에도 보낸다.
+  if (import.meta.env?.DEV) navigator.sendBeacon('/__log', msg)
+  remoteLog(msg)
 }
 window.addEventListener('error', e => log('error', e.message))
 window.addEventListener('unhandledrejection', e => log('rejection', e.reason))
@@ -214,6 +217,7 @@ let stops: string[] = []
 let train: Arrival | null = null
 let boardedAt = 0            // 열차를 고른 시각. 도착 예정 시간을 깎는 데 쓴다.
 let approach = ''            // 아직 승강장에 오지 않은 열차의 현재 역
+let atStatus = -1            // 마지막 관측의 trainSttus. 0 진입, 1 도착, 2 출발
 let fixes: Fix[] = []
 let busy = false
 let pollTimer: ReturnType<typeof setTimeout> | null = null
@@ -388,6 +392,7 @@ async function board(a: Arrival): Promise<void> {
   boardedAt = Date.now()
   approach = ''
   fixes = []
+  atStatus = -1
   mode = 'riding'
   log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
   await show(S.waiting({
@@ -413,6 +418,7 @@ async function poll(gen: number): Promise<void> {
       } else if (stops.includes(me.station)) {
         misses = 0
         approach = ''
+        atStatus = me.status
         const last = fixes[fixes.length - 1]
         if (!last || last.station !== me.station) fixes.push({ station: me.station, at: me.at })
       } else {
@@ -472,9 +478,13 @@ async function render(): Promise<void> {
   }
 
   const nextLeg = trip!.legs[legIndex + 1]
+  // 지금 어디인지. 관측이면 전광판과 같은 말(진입·도착·출발), 추정이면 추정이라고 말한다.
+  const at = guess.estimated > 0
+    ? { station: stops[guess.index], label: '부근 (추정)' }
+    : { station: stops[guess.index], label: S.statusWord(atStatus) || '통과' }
   await show(S.riding({
     now, line: leg().line,
-    toward: train!.dest || train!.toward,
+    at,
     next: stops[guess.index + 1],
     legDest: dest, stopsLeft: left, paceMs: pace,
     pathLen: stops.length, index: guess.index, estimated: guess.estimated,

@@ -22,6 +22,15 @@ const reply = (body, status, extra = {}) =>
 export default {
   async fetch(request, env) {
     if (request.method === 'OPTIONS') return reply(null, 204)
+
+    // 기기 로그. dev 서버는 같은 Wi-Fi에서만 받는다. 지하철에 타면 끊긴다.
+    // 여기로 보내면 `npx wrangler tail`로 어디서든 본다. 저장하지 않는다.
+    if (request.method === 'POST' && new URL(request.url).pathname === '/log') {
+      if (request.headers.get('x-metro-token') !== env.METRO_TOKEN) return reply('forbidden', 403)
+      console.log('[device]', (await request.text()).slice(0, 500))
+      return reply(null, 204)
+    }
+
     if (request.method !== 'GET') return reply('method not allowed', 405)
 
     const url = new URL(request.url)

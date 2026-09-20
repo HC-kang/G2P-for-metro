@@ -91,29 +91,38 @@ const context = (now: number, line: string, toward: string): string => {
   return cols(head(now, full)) <= MAX_COLS ? full : line
 }
 
-// 주행 중. 다음 역이 주인공이고 나머지는 물러선다.
-// 환승이 있으면 이번 구간 하차역 대신 환승 안내와 최종 도착 시각을 보여준다.
+// 열차 상태. realtimePosition의 trainSttus다. 승강장 전광판과 같은 표현이다.
+export const statusWord = (status: number): string =>
+  status === 0 ? '진입' : status === 1 ? '도착' : status === 2 ? '출발' : ''
+
+// 주행 중. 지금 어디인지와 다음 역이 함께 보여야 한다.
+// 노선 방면은 머리줄로 물러선다. 이미 탄 뒤에는 어디쯤인지가 더 급하다.
 export function riding(a: {
-  now: number; line: string; toward: string; next: string
-  legDest: string; stopsLeft: number; paceMs: number
+  now: number; line: string
+  at: { station: string; label: string }
+  next: string; legDest: string; stopsLeft: number; paceMs: number
   pathLen: number; index: number; estimated: number
   transfer?: { line: string; finalDest: string; finalMinutes: number }
 }): string {
   const left = mins(a.paceMs, a.stopsLeft)
   return screen(
-    head(a.now, context(a.now, a.line, a.toward)),
+    head(a.now, a.line),
+    '',
+    ...pair(a.at.station, a.at.label),
     '',
     `${PAD}다음   ${hero(a.next, 9)}`,
     '',
     `${PAD}${track(a.pathLen, a.index, a.estimated)}`,
-    ...(a.transfer ? [] : pair(a.legDest, `${hhmm(a.now + left * 60_000)} 도착`)),
-    `${PAD}${a.stopsLeft}정거장 · 약 ${left}분`,
     ...(a.transfer
-      ? ['',
-         `${PAD}▸ ${a.legDest} 환승`,
-         `${PAD}  ${a.transfer.line}으로 갈아탑니다`,
-         ...pair(a.transfer.finalDest, `${hhmm(a.now + a.transfer.finalMinutes * 60_000)} 도착`, `${PAD}  `)]
-      : []),
+      ? [
+          ...pair(a.legDest, `${hhmm(a.now + left * 60_000)} 환승`),
+          `${PAD}${a.stopsLeft}정거장 · ${a.transfer.line}으로`,
+          ...pair(a.transfer.finalDest, `${hhmm(a.now + a.transfer.finalMinutes * 60_000)} 도착`),
+        ]
+      : [
+          ...pair(a.legDest, `${hhmm(a.now + left * 60_000)} 도착`),
+          `${PAD}${a.stopsLeft}정거장 · 약 ${left}분`,
+        ]),
   )
 }
 
