@@ -98,5 +98,24 @@ if (!RT_KEY) {
   if (gone.length) throw new Error(`주요 노선 ID가 빠졌습니다: ${gone.join(' ')}. 운행 시간대에 다시 돌리세요.`)
 }
 
-writeFileSync('src/stations.json', JSON.stringify({ lines, stations }))
+// 좌표: subwayStationMaster (BLDN_NM, ROUTE, LAT, LOT). 784개역.
+// 같은 역 이름은 노선이 달라도 위치가 사실상 같다. 이름당 한 건만 둔다.
+const geo = await json(`http://openapi.seoul.go.kr:8088/${KEY}/json/subwayStationMaster/1/1000/`)
+const geoRows = geo.subwayStationMaster?.row
+if (!geoRows) throw new Error(JSON.stringify(geo).slice(0, 300))
+
+const coordMap = new Map()
+for (const r of geoRows) {
+  const name = String(r.BLDN_NM).replace(/\(.*\)$/, '')
+  const lat = Number(r.LAT)
+  const lon = Number(r.LOT)
+  if (!name || !Number.isFinite(lat) || !Number.isFinite(lon)) continue
+  if (!coordMap.has(name)) coordMap.set(name, { name, lat, lon })
+}
+const coords = [...coordMap.values()]
+const missing = [...new Set(stations.map(s => s.name))].filter(n => !coordMap.has(n))
+console.log(`좌표 ${coords.length}건. 좌표 없는 역 ${missing.length}개: ${missing.join(' ')}`)
+if (missing.length > 30) throw new Error('좌표 미매칭이 너무 많습니다. 이름 정규화를 확인하세요.')
+
+writeFileSync('src/stations.json', JSON.stringify({ lines, stations, coords }))
 console.log(`역 ${stations.length}개, 노선 이름 ${lineNames.length}개, 노선 ID ${lines.length}개를 저장했습니다.`)
