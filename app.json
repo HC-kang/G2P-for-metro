@@ -1,0 +1,21 @@
+{
+  "package_id": "com.ford.metro",
+  "edition": "202601",
+  "name": "Metro",
+  "version": "0.1.0",
+  "min_app_version": "2.0.0",
+  "min_sdk_version": "0.0.15",
+  "entrypoint": "index.html",
+  "permissions": [
+    {
+      "name": "network",
+      "desc": "지하철 실시간 도착 정보와 열차 위치를 받습니다.",
+      "whitelist": ["https://metro.weston0713.workers.dev"]
+    },
+    {
+      "name": "location",
+      "desc": "가까운 지하철역을 찾기 위해 위치를 확인합니다."
+    }
+  ],
+  "supported_languages": ["ko", "en"]
+}

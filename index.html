@@ -25,10 +25,22 @@
         box-sizing: border-box;
         text-align: center;
       }
+      textarea { font: inherit; background: #1a1a1a; color: inherit; border: 1px solid #444; border-radius: 6px }
+      button { font: inherit; background: #333; color: inherit; border: 1px solid #555; border-radius: 6px }
+      code { background: #1a1a1a; padding: 1px 4px; border-radius: 3px }
     </style>
   </head>
   <body>
-    <div id="app">준비 중</div>
+    <form id="app">
+      <div>
+        <p>자주 가는 도착지 (한 줄에 하나, 최대 8개)</p>
+        <textarea id="dests" rows="8" placeholder="강남&#10;경복궁&#10;여의도"
+                  style="width: 100%; padding: 10px; box-sizing: border-box"></textarea>
+        <p style="opacity: 0.7">출발역은 GPS로 찾습니다. API key는 필요 없습니다.</p>
+        <button style="margin-top: 12px; padding: 10px 24px">저장</button>
+        <p id="status"></p>
+      </div>
+    </form>
     <script type="module" src="/src/main.ts"></script>
   </body>
 </html>
