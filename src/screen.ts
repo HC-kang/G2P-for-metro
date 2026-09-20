@@ -82,7 +82,7 @@ const screen = (...lines: (string | null)[]) => lines.filter(l => l !== null).jo
 
 // 모든 화면의 첫 줄. 화면에는 도착 예정 시각도 나오므로 현재 시각임을 '지금'으로 밝힌다.
 // 오른쪽 정렬은 폭을 알아야 하므로 쓰지 않는다.
-const head = (now: number, context = '') => `${PAD}지금 ${hhmm(now)}${context ? `  ${context}` : ''}`
+const head = (now: number, context = '') => `${PAD}현재시각 ${hhmm(now)}${context ? `  ${context}` : ''}`
 
 // 머리줄이 넘치면 행선지를 버리고 노선만 남긴다.
 // '동대문역사문화공원행'은 그것만으로 20칸이다.

@@ -157,11 +157,11 @@ test('실제 경로로 만든 화면이 모두 한도를 지킨다', async () =>
 test('머리줄이 현재 시각임을 밝힌다', () => {
   // 화면에 도착 예정 시각도 나오므로 현재 시각과 구별되어야 한다
   const s = riding()
-  assert.ok(s.startsWith('  지금 18:42'), s.split('\n')[0])
-  assert.ok(s.includes('교대 18:50 도착'), '도착 시각에는 지금이 붙지 않아야 합니다')
+  assert.ok(s.startsWith('  현재시각 18:42'), s.split('\n')[0])
+  assert.ok(s.includes('교대 18:50 도착'), '도착 시각에는 현재시각이 붙지 않아야 합니다')
   for (const scr of [
     S.arrived(T, '하계'),
     S.alight({ now: T, stopsLeft: 2, dest: '하계', next: '중계', minutes: 4 }),
     S.notice(T, '머리말', '본문', '탭: 처음으로'),
-  ]) assert.ok(scr.split('\n')[0].includes('지금 18:42'), scr)
+  ]) assert.ok(scr.split('\n')[0].includes('현재시각 18:42'), scr)
 })
