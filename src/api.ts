@@ -12,7 +12,7 @@ export type TrainPos = {
 
 export type Arrival = {
   trainNo: string; station: string; line: string
-  etaSec: number; msg: string; toward: string; express: boolean
+  etaSec: number; msg: string; toward: string; dest: string; express: boolean
 }
 
 // "광운대행 - 시청방면"           -> "시청"
@@ -20,6 +20,12 @@ export type Arrival = {
 // "불암산행 - 총신대입구(이수)방면" -> "총신대입구"  (괄호 별칭을 떼야 역 목록과 맞는다)
 export const towardOf = (trainLineNm: string): string => {
   const m = /-\s*(.+?)방면/.exec(trainLineNm ?? '')
+  return m ? m[1].replace(/\(.*?\)/g, '').trim() : ''
+}
+
+// "광운대행 - 시청방면" -> "광운대". 승강장 전광판이 보여주는 행선지다.
+export const destOf = (trainLineNm: string): string => {
+  const m = /^\s*(.+?)행/.exec(trainLineNm ?? '')
   return m ? m[1].replace(/\(.*?\)/g, '').trim() : ''
 }
 
@@ -53,6 +59,7 @@ export function parseArrivals(body: unknown): Arrival[] {
     etaSec: Number(r.barvlDt ?? 0),
     msg: String(r.arvlMsg2 ?? ''),
     toward: towardOf(String(r.trainLineNm ?? '')),
+    dest: destOf(String(r.trainLineNm ?? '')),
     express: String(r.btrainSttus ?? '').includes('급행'),
   }))
 }

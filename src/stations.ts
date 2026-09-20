@@ -82,6 +82,9 @@ for (const g of byName.values()) {
   }
 }
 
+// 폰 설정 화면의 검증과 자동완성이 쓴다. 추적 가능한 역만 들어 있다.
+export const NAMES: readonly string[] = [...new Set(STATIONS.map(s => s.name))].sort((a, b) => a.localeCompare(b, 'ko'))
+
 export const neighbors = (n: string): Edge[] => adj.get(n) ?? []
 export const nodesOf = (name: string): string[] => (byName.get(name) ?? []).map(s => node(s.line, s.name))
 export const stationAt = (n: string): Station | undefined => byNode.get(n)

@@ -4,14 +4,12 @@ import {
   CreateStartUpPageContainer, RebuildPageContainer, OsEventTypeList,
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
-import { COORDS } from './stations.ts'
+import { COORDS, NAMES, transferLines } from './stations.ts'
 import { plan, locate, paceMs, stopsLeft, type Plan, type Fix } from './route.ts'
 import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, type Arrival } from './api.ts'
-import {
-  fitItems, bytes, progressBar, ridingBoxes, alertScreen, transferScreen, lostScreen, planScreen,
-  type Boxes,
-} from './screen.ts'
+import { lineShort, lineColor } from './lines.ts'
+import * as S from './screen.ts'
 
 const log = (...a: unknown[]) => {
   if (import.meta.env?.DEV) navigator.sendBeacon('/__log', a.map(String).join(' '))
@@ -22,105 +20,193 @@ window.addEventListener('unhandledrejection', e => log('rejection', e.reason))
 const bridge = await waitForEvenAppBridge()
 
 // ---------- G2 화면 ----------
+// 화면 하나에 컨테이너 하나를 꽉 채운다. 테두리 상자를 쌓지 않는다.
+// 위계는 여백, 자간, 가로줄 하나가 만든다.
 
-const box = (id: number, y: number, h: number, content: string, capture = 0) =>
-  new TextContainerProperty({
-    xPosition: 0, yPosition: y, width: 576, height: h,
-    borderWidth: 1, paddingLength: 6,
-    containerID: id, containerName: `b${id}`,
-    content, isEventCapture: capture,
-  })
-
-// 상자 3개가 위계를 만든다. G2는 폰트 크기를 바꿀 수 없다.
-// isEventCapture는 페이지당 정확히 1개여야 한다.
-const boxPage = (b: Boxes) => ({
-  containerTotalNum: 3,
-  textObject: [box(1, 0, 104, b.top, 1), box(2, 104, 104, b.mid), box(3, 208, 80, b.bottom)],
-})
-
-const fullPage = (content: string) => ({
+const full = (content: string) => ({
   containerTotalNum: 1,
-  textObject: [box(1, 0, 288, content, 1)],
+  textObject: [new TextContainerProperty({
+    xPosition: 0, yPosition: 0, width: 576, height: 288,
+    borderWidth: 0, paddingLength: 8,
+    containerID: 1, containerName: 'main',
+    content, isEventCapture: 1,
+  })],
 })
 
-const listPage = (items: string[]) => ({
+const listOf = (items: string[]) => ({
   containerTotalNum: 1,
   listObject: [new ListContainerProperty({
     xPosition: 0, yPosition: 0, width: 576, height: 288,
-    borderWidth: 0, paddingLength: 4,
+    borderWidth: 0, paddingLength: 8,
     containerID: 1, containerName: 'rows',
     itemContainer: new ListItemContainerProperty({
-      itemCount: items.length, itemWidth: 568, isItemSelectBorderEn: 1, itemName: items,
+      itemCount: items.length, itemWidth: 560, isItemSelectBorderEn: 1, itemName: items,
     }),
     isEventCapture: 1,
   })],
 })
 
 // 반환값을 확인한다. tiro는 이것을 빼먹어 화면이 멈췄다.
-async function showFull(content: string): Promise<void> {
-  const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(fullPage(content)))
-  log('full', ok, 'bytes', bytes(content))
+async function show(content: string): Promise<void> {
+  const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(full(content)))
+  log('show', ok, 'bytes', S.bytes(content))
   if (!ok) {
     await bridge.rebuildPageContainer(new RebuildPageContainer(
-      fullPage('화면을 표시하지 못했습니다.\n탭: 처음으로 · 더블탭: 종료')))
+      full(S.notice('화면을 표시하지 못했습니다', '', '탭: 처음으로 · 더블탭: 종료'))))
   }
 }
 
-async function showBoxes(b: Boxes): Promise<void> {
-  const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(boxPage(b)))
-  log('boxes', ok, 'bytes', bytes(b.top + b.mid + b.bottom))
-  // 상자 3개가 거부되면 전체 화면 1개로 떨어뜨린다
-  if (!ok) await showFull(`${b.top}\n${b.mid}\n${b.bottom}`)
-}
-
 async function showList(items: string[]): Promise<boolean> {
-  const fitted = fitItems(items)
-  const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(listPage(fitted)))
-  log('list', ok, 'count', fitted.length, 'bytes', bytes(fitted.join('')))
+  const fitted = S.fitsAll(items) ? items : S.fitItems(items)
+  const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(listOf(fitted)))
+  log('list', ok, 'count', fitted.length, 'bytes', S.bytes(fitted.join('')))
   return !!ok
 }
 
-// ---------- 폰 설정 화면 ----------
-// 자주 가는 도착지만 받는다. 키 입력란은 없다. 실시간 키는 워커가 들고 있다.
+// ---------- 저장 ----------
 
-const MAX_DESTS = 8
+// G2 목록 위젯이 한 화면에 20항목까지 보여준다. 그것이 유일한 한도다.
+// 항목 하나가 약 34바이트라 20개를 넣어도 페이지 한도 950바이트 안에 든다.
+const MAX_DESTS = 20
 const parseLines = (t: string, max: number) =>
   t.split('\n').map(s => s.trim()).filter(Boolean).slice(0, max)
 
 let dests = parseLines((await bridge.getLocalStorage('destinations')) ?? '', MAX_DESTS)
 let recents = parseLines((await bridge.getLocalStorage('recentOrigins')) ?? '', 5)
 
-const status = document.querySelector<HTMLElement>('#status')!
-const destField = document.querySelector<HTMLTextAreaElement>('#dests')!
-destField.value = dests.join('\n')
-const showStatus = () => { status.textContent = `도착지 ${dests.length}개 · 최근 출발역 ${recents.length}개` }
-showStatus()
-
-document.querySelector<HTMLFormElement>('#app')!.addEventListener('submit', async e => {
-  e.preventDefault()
-  dests = parseLines(destField.value, MAX_DESTS)
-  await bridge.setLocalStorage('destinations', dests.join('\n'))
-  destField.value = dests.join('\n')
-  showStatus()
-  await showOrigin()
-})
+const saveDests = () => bridge.setLocalStorage('destinations', dests.join('\n'))
 
 async function rememberOrigin(name: string): Promise<void> {
   recents = [name, ...recents.filter(r => r !== name)].slice(0, 5)
   await bridge.setLocalStorage('recentOrigins', recents.join('\n'))
 }
 
+// ---------- 폰 설정 화면 ----------
+// 역 이름을 치면 바로 검증한다. 오타는 저장되기 전에 잡힌다.
+
+const $ = <T extends HTMLElement>(sel: string) => document.querySelector<T>(sel)!
+const listEl = $('#list')
+const countEl = $('#count')
+const noteEl = $('#note')
+const hitsEl = $('#hits')
+const qEl = $<HTMLInputElement>('#q')
+const goEl = $<HTMLButtonElement>('#go')
+
+const badge = (line: string) => {
+  const el = document.createElement('span')
+  el.className = 'badge'
+  el.textContent = lineShort(line)
+  el.style.background = lineColor(line)
+  return el
+}
+
+function renderDests(): void {
+  listEl.replaceChildren()
+  countEl.textContent = dests.length >= MAX_DESTS
+    ? `${dests.length}곳 · G2 목록이 가득 찼습니다`
+    : dests.length ? `${dests.length}곳` : ''
+  if (!dests.length) {
+    const li = document.createElement('li')
+    li.className = 'empty'
+    li.textContent = '아직 없습니다. 아래에 역 이름을 넣으세요.'
+    listEl.append(li)
+  }
+  for (const name of dests) {
+    const lines = transferLines(name)
+    const li = document.createElement('li')
+    if (!lines.length) li.className = 'missing'
+
+    const drop = document.createElement('button')
+    drop.className = 'drop'
+    drop.type = 'button'
+    drop.textContent = '×'
+    drop.setAttribute('aria-label', `${name} 지우기`)
+    drop.addEventListener('click', async () => {
+      dests = dests.filter(d => d !== name)
+      await saveDests()
+      renderDests()
+      await showOrigin()
+    })
+
+    const nm = document.createElement('span')
+    nm.className = 'name'
+    nm.textContent = name
+
+    li.append(drop, nm)
+    if (lines.length) {
+      const b = document.createElement('span')
+      b.className = 'badges'
+      for (const l of lines) b.append(badge(l))
+      li.append(b)
+    } else {
+      const why = document.createElement('span')
+      why.className = 'why'
+      why.textContent = '찾을 수 없음'
+      li.append(why)
+    }
+    listEl.append(li)
+  }
+  noteEl.textContent = dests.some(d => !transferLines(d).length)
+    ? '찾을 수 없는 역은 안내에 쓰이지 않습니다. 인천·김포·용인·의정부 노선은 실시간 정보가 없습니다.'
+    : ''
+  qEl.placeholder = dests.length >= MAX_DESTS ? '가득 찼습니다' : '역 이름'
+}
+
+function renderHits(): void {
+  const q = qEl.value.trim()
+  goEl.disabled = !q || dests.includes(q) || dests.length >= MAX_DESTS
+  hitsEl.replaceChildren()
+  if (!q) return
+  const hits = NAMES.filter(n => n.startsWith(q) && !dests.includes(n)).slice(0, 6)
+  for (const name of hits) {
+    const li = document.createElement('li')
+    li.tabIndex = 0
+    const nm = document.createElement('span')
+    nm.className = 'name'
+    nm.textContent = name
+    const b = document.createElement('span')
+    b.className = 'badges'
+    for (const l of transferLines(name)) b.append(badge(l))
+    li.append(nm, b)
+    const pick = () => add(name)
+    li.addEventListener('click', pick)
+    li.addEventListener('keydown', e => { if ((e as KeyboardEvent).key === 'Enter') pick() })
+    hitsEl.append(li)
+  }
+}
+
+async function add(name: string): Promise<void> {
+  if (!name || dests.includes(name) || dests.length >= MAX_DESTS) return
+  dests = [...dests, name]
+  await saveDests()
+  qEl.value = ''
+  renderHits()
+  renderDests()
+  await showOrigin()
+}
+
+qEl.addEventListener('input', renderHits)
+$<HTMLFormElement>('#add').addEventListener('submit', async e => {
+  e.preventDefault()
+  const q = qEl.value.trim()
+  // 정확히 맞는 역이 없으면 첫 후보를 넣는다. 오타로 빈 항목이 생기지 않는다.
+  await add(NAMES.includes(q) ? q : (NAMES.find(n => n.startsWith(q)) ?? q))
+})
+renderDests()
+renderHits()
+
 // ---------- 상태 ----------
 
 type Mode = 'origin' | 'dest' | 'pick' | 'riding' | 'transfer' | 'arrived'
 let mode: Mode = 'origin'
-let rows: string[] = []      // 현재 목록의 각 행이 뜻하는 값
+let rows: string[] = []      // 목록의 각 행이 뜻하는 값
 let origin = ''
 let trip: Plan | null = null
 let legIndex = 0
 let stops: string[] = []
-let trainNo = ''
-let candidates: Arrival[] = []
+let train: Arrival | null = null
+let boardedAt = 0            // 열차를 고른 시각. 도착 예정 시간을 깎는 데 쓴다.
+let approach = ''            // 아직 승강장에 오지 않은 열차의 현재 역
 let fixes: Fix[] = []
 let busy = false
 let pollTimer: ReturnType<typeof setTimeout> | null = null
@@ -128,66 +214,86 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null
 const GPS_TIMEOUT_MS = 5000
 const POLL_MS = 10_000
 const leg = () => trip!.legs[legIndex]
+const toward = () => leg().stops[leg().stops.length - 1]
 
 function stopPolling(): void {
   if (pollTimer) clearTimeout(pollTimer)
   pollTimer = null
 }
 
-// ---------- ORIGIN: GPS로 출발역 ----------
+// ---------- 출발역 ----------
 
+async function locateOnce(): Promise<Near[]> {
+  const loc = await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
+  log('gps', loc?.latitude, loc?.longitude, 'acc', loc?.accuracy)
+  if (!loc || !Number.isFinite(loc.latitude)) return []
+  // 오차가 크면 목록 순서를 믿을 수 없다. GPS를 버린다.
+  if ((loc.accuracy ?? 0) > MAX_ACCURACY_M) return []
+  return nearest(loc.latitude, loc.longitude, COORDS, 8)
+}
+
+// 첫 호출이 null을 주는 것을 실기기에서 봤다. 한 번 더 부른다.
 async function nearbyStations(): Promise<Near[]> {
-  try {
-    const loc = await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
-    log('gps', loc?.latitude, loc?.longitude, 'acc', loc?.accuracy)
-    if (!loc || !Number.isFinite(loc.latitude)) return []
-    // 오차가 크면 목록 순서를 믿을 수 없다. GPS를 버린다.
-    if ((loc.accuracy ?? 0) > MAX_ACCURACY_M) return []
-    return nearest(loc.latitude, loc.longitude, COORDS, 8)
-  } catch (e) {
-    log('gps failed', e)
-    return []
+  for (let i = 0; i < 2; i++) {
+    try {
+      const near = await locateOnce()
+      if (near.length) return near
+    } catch (e) {
+      log('gps failed', i, e)
+    }
   }
+  return []
 }
 
 async function showOrigin(): Promise<void> {
   mode = 'origin'
   trip = null
+  train = null
   stopPolling()
-  await showFull('출발역을 찾는 중...')
+  await show(S.notice('출발역을 찾는 중', '', '위치를 확인하고 있습니다'))
   const near = await nearbyStations()
   const names = [...near.map(n => n.name), ...recents.filter(r => !near.some(n => n.name === r))]
   if (!names.length) {
     rows = []
-    return showFull('출발역을 찾지 못했습니다.\n폰에서 도착지를 먼저 넣으세요.\n탭: 다시 시도 · 더블탭: 종료')
+    return show(S.notice('출발역을 찾지 못했습니다', '폰에서 자주 가는 곳을 먼저 넣으세요', '탭: 다시 시도 · 더블탭: 종료'))
   }
-  const label = new Map(near.map(n => [n.name, `${n.name}  ${n.meters}m`]))
-  const items = names.map(n => label.get(n) ?? `${n}  (최근)`)
+  const meters = new Map(near.map(n => [n.name, n.meters]))
   rows = names
+  const items = S.rows(names, n => {
+    const m = meters.get(n)
+    const lines = transferLines(n).map(lineShort).join('·')
+    return m === undefined ? `${lines}  최근` : `${lines}  ${m}m`
+  })
   if (!near.length) {
-    // 안내행은 고를 수 없어야 한다. rows에 빈 문자열을 두면 onTap이 다시 시도한다.
-    items.unshift('GPS 실패 · 최근 출발역')
+    // 안내행은 고를 수 없어야 한다. rows의 빈 문자열이 onTap을 다시 시도로 보낸다.
+    items.unshift('위치를 찾지 못했습니다 · 최근 출발역')
     rows = ['', ...names]
   }
   if (!(await showList(items))) {
     rows = []
-    await showFull('목록을 표시하지 못했습니다.\n탭: 다시 시도 · 더블탭: 종료')
+    await show(S.notice('목록을 표시하지 못했습니다', '', '탭: 다시 시도 · 더블탭: 종료'))
   }
 }
 
-// ---------- DEST: 도착지 ----------
+// ---------- 도착지 ----------
 
 async function showDest(): Promise<void> {
   mode = 'dest'
-  const list = dests.filter(d => d !== origin)
-  if (!list.length) {
+  const usable = dests.filter(d => d !== origin && plan(origin, d))
+  if (!usable.length) {
     rows = []
-    return showFull('폰 화면에서 자주 가는 도착지를 넣으세요.\n탭: 출발역 다시 고르기 · 더블탭: 종료')
+    return show(S.notice('갈 수 있는 곳이 없습니다', `${origin}에서 이어지는 경로를 찾지 못했습니다`, '탭: 출발역 다시 고르기'))
   }
-  rows = list
-  if (!(await showList(list.map(d => `${origin} → ${d}`)))) {
+  rows = usable
+  // 정거장 수와 환승 횟수를 함께 보여준다. 무엇을 고를지 여기서 정해진다.
+  const items = S.rows(usable, d => {
+    const p = plan(origin, d)!
+    const n = p.legs.reduce((sum, l) => sum + l.stops.length - 1, 0)
+    return p.legs.length > 1 ? `${n}정거장 · 환승 ${p.legs.length - 1}` : `${n}정거장`
+  })
+  if (!(await showList(items))) {
     rows = []
-    await showFull('목록을 표시하지 못했습니다.\n탭: 출발역 다시 고르기')
+    await show(S.notice('목록을 표시하지 못했습니다', '', '탭: 출발역 다시 고르기'))
   }
 }
 
@@ -196,21 +302,21 @@ async function startTrip(dest: string): Promise<void> {
   if (!trip || !trip.legs.length) {
     mode = 'dest'
     rows = []
-    // 실시간 미지원 노선(인천·김포·용인·의정부)의 역은 그래프에 없어서 여기로 온다
-    return showFull(`경로를 찾지 못했습니다.\n${origin} → ${dest}\n역 이름과 노선을 확인하세요.\n탭: 도착지 다시 고르기`)
+    return show(S.notice('경로를 찾지 못했습니다', `${origin} → ${dest}`, '탭: 도착지 다시 고르기'))
   }
   await rememberOrigin(origin)
   log('plan', origin, dest, trip.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' '))
-  await showFull(planScreen(trip))
+  await show(S.route(trip))
   await startLeg(0)
 }
 
-// ---------- PICK: 탈 열차 ----------
+// ---------- 탈 열차 ----------
 
 async function startLeg(i: number): Promise<void> {
   legIndex = i
   stops = leg().stops
-  trainNo = ''
+  train = null
+  approach = ''
   await showPick()
 }
 
@@ -221,52 +327,64 @@ async function showPick(): Promise<void> {
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
   // 방향은 "…방면" 역이 다음 역과 같은지로 가른다.
   // "…방면"은 급행이든 일반이든 인접한 다음 역이다. updnLine은 읽지 않는다.
-  const next = stops[1]
-  const sameWay = sameLine.filter(a => a.toward === next)
+  const sameWay = sameLine.filter(a => a.toward === stops[1])
   // 이름 표기가 어긋나 0대가 되면 거르지 않는다.
   // "도착 정보 없음"으로 막히는 것보다 한 번 더 묻는 편이 안전하다.
-  candidates = (sameWay.length ? sameWay : sameLine)
-    .sort((a, b) => a.etaSec - b.etaSec)
-    .slice(0, 18)
-  log('candidates', candidates.length, 'sameWay', sameWay.length, 'line', sameLine.length, 'of', all.length, 'next', next)
+  const candidates = (sameWay.length ? sameWay : sameLine).sort((a, b) => a.etaSec - b.etaSec).slice(0, 18)
+  log('candidates', candidates.length, 'sameWay', sameWay.length, 'line', sameLine.length, 'of', all.length, 'next', stops[1])
 
   if (!candidates.length) {
     rows = []
-    return showFull(`${from}\n${stops[stops.length - 1]} 방면 도착 정보가 없습니다.\n탭: 다시 확인 · 더블탭: 처음으로`)
+    return show(S.notice(`${from}에 오는 열차가 없습니다`, `${toward()} 방면 도착 정보가 비어 있습니다`, '탭: 다시 확인 · 더블탭: 처음으로'))
   }
-  if (candidates.length === 1) return board(candidates[0].trainNo)
+  if (candidates.length === 1) return board(candidates[0])
 
+  picks = candidates
   rows = candidates.map(a => a.trainNo)
-  const items = candidates.map(a =>
-    `${a.etaSec > 0 ? `${Math.max(1, Math.round(a.etaSec / 60))}분` : a.msg} ${a.express ? '급행 ' : ''}${a.toward}방면`)
+  const items = S.fitItems(candidates.map(a => {
+    const when = a.etaSec > 0 ? `${Math.max(1, Math.round(a.etaSec / 60))}분` : '곧'
+    return `${when}  ${a.dest || a.toward}행${a.express ? ' · 급행' : ''}`
+  }))
   if (!(await showList(items))) {
     rows = []
-    await showFull('열차 목록을 표시하지 못했습니다.\n탭: 다시 확인')
+    await show(S.notice('열차 목록을 표시하지 못했습니다', '', '탭: 다시 확인'))
   }
 }
 
-async function board(no: string): Promise<void> {
-  trainNo = no
+let picks: Arrival[] = []
+
+async function board(a: Arrival): Promise<void> {
+  train = a
+  boardedAt = Date.now()
+  approach = ''
   fixes = []
   mode = 'riding'
-  log('boarded', no, leg().line)
-  await showFull(`${no}번 열차\n추적을 시작합니다...`)
+  log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
+  await show(S.waiting({
+    line: leg().line, toward: a.dest || a.toward, trainNo: a.trainNo,
+    at: '확인 중', from: stops[0], etaSec: a.etaSec,
+  }))
   stopPolling()
   await poll()
 }
 
-// ---------- RIDING: 추적 ----------
+// ---------- 추적 ----------
 
 async function poll(): Promise<void> {
   if (mode !== 'riding') return
   if (!busy) {
     try {
-      const me = (await positions(leg().line)).find(t => t.trainNo === trainNo)
-      if (me && stops.includes(me.station)) {
+      const me = (await positions(leg().line)).find(t => t.trainNo === train!.trainNo)
+      if (!me) {
+        log('train not in feed', train!.trainNo)
+      } else if (stops.includes(me.station)) {
+        approach = ''
         const last = fixes[fixes.length - 1]
         if (!last || last.station !== me.station) fixes.push({ station: me.station, at: me.at })
       } else {
-        log('train missing', trainNo)
+        // 고른 열차가 아직 승강장에 오지 않았다. 오는 중이다.
+        approach = me.station
+        log('train approaching', me.station)
       }
     } catch (e) {
       log('poll failed', e)   // 일시적 실패는 화면을 바꾸지 않는다. render가 추정으로 처리한다
@@ -279,9 +397,17 @@ async function poll(): Promise<void> {
 async function render(): Promise<void> {
   const now = Date.now()
   const guess = locate(stops, fixes, now)
+
   if (!guess) {
-    rows = []
-    return showFull(`${trainNo}번 열차\n아직 위치를 못 찾았습니다.\n탭: 열차 다시 고르기`)
+    // 아직 타지 않았다. 열차가 오는 중이거나, 열차를 못 찾았다.
+    const etaSec = Math.max(0, train!.etaSec - Math.round((now - boardedAt) / 1000))
+    if (approach) {
+      return show(S.waiting({
+        line: leg().line, toward: train!.dest || train!.toward, trainNo: train!.trainNo,
+        at: approach, from: stops[0], etaSec,
+      }))
+    }
+    return show(S.notice(`${train!.trainNo}번 열차를 찾지 못했습니다`, '실시간 정보에 나타나지 않습니다', '탭: 열차 다시 고르기'))
   }
 
   const left = stopsLeft(stops, stops[guess.index])
@@ -289,39 +415,33 @@ async function render(): Promise<void> {
 
   const pace = paceMs(stops, fixes)
   const lastFix = fixes[fixes.length - 1]
+  const dest = stops[stops.length - 1]
 
   if (guess.stale) {
-    rows = []
-    return showFull(lostScreen({
+    return show(S.lost({
       last: lastFix.station,
       agoSec: Math.round((now - lastFix.at) / 1000),
       guess: stops[guess.index],
-      stopsLeft: left,
-      bar: progressBar(stops.length, guess.index, guess.estimated),
+      dest, stopsLeft: left,
+      bar: S.track(stops.length, guess.index, guess.estimated),
     }))
   }
 
   if (left <= 2) {
-    return showFull(alertScreen({
-      stopsLeft: left,
-      next: stops[guess.index + 1],
-      dest: stops[stops.length - 1],
+    return show(S.alight({
+      stopsLeft: left, dest, next: stops[guess.index + 1],
       minutes: Math.max(1, Math.round((pace * left) / 60_000)),
     }))
   }
 
   const nextLeg = trip!.legs[legIndex + 1]
-  await showBoxes(ridingBoxes({
+  await show(S.riding({
+    line: leg().line,
+    toward: train!.dest || train!.toward,
     next: stops[guess.index + 1],
-    stopsLeft: left,
-    paceMs: pace,
-    dest: stops[stops.length - 1],
-    pathLen: stops.length,
-    index: guess.index,
-    estimated: guess.estimated,
-    transfer: nextLeg
-      ? { station: stops[stops.length - 1], line: nextLeg.line, stopsAway: left }
-      : undefined,
+    dest, stopsLeft: left, paceMs: pace,
+    pathLen: stops.length, index: guess.index, estimated: guess.estimated,
+    transfer: nextLeg ? { station: dest, line: nextLeg.line } : undefined,
   }))
 }
 
@@ -331,16 +451,14 @@ async function arrive(): Promise<void> {
   const nextLeg = trip!.legs[legIndex + 1]
   if (nextLeg) {
     mode = 'transfer'
-    return showFull(transferScreen({
+    return show(S.transfer({
       station: stops[stops.length - 1],
-      from: leg().line,
-      to: nextLeg.line,
+      from: leg().line, to: nextLeg.line,
       toward: nextLeg.stops[nextLeg.stops.length - 1],
     }))
   }
   mode = 'arrived'
-  const dest = stops[stops.length - 1]
-  await showFull(`\n\n     ${[...dest].join(' ')}\n\n     도착했습니다.\n\n     탭: 처음으로 · 더블탭: 종료`)
+  await show(S.arrived(stops[stops.length - 1]))
 }
 
 // ---------- 이벤트 ----------
@@ -364,8 +482,8 @@ async function onTap(index: number): Promise<void> {
     return startTrip(pick)
   }
   if (mode === 'pick') {
-    const pick = rows[index]
-    return pick ? board(pick) : showPick()      // 실패 화면에서 탭하면 다시 확인
+    const a = picks.find(p => p.trainNo === rows[index])
+    return a ? board(a) : showPick()          // 실패 화면에서 탭하면 다시 확인
   }
   if (mode === 'riding') { stopPolling(); return showPick() }   // 엉뚱한 열차를 잡았을 때
   if (mode === 'transfer') return startLeg(legIndex + 1)
@@ -394,13 +512,13 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
     stopPolling()
     mode = 'origin'
     rows = []
-    await showFull(`오류\n${e}\n탭: 처음으로 · 더블탭: 종료`)
+    await show(S.notice('오류', String(e), '탭: 처음으로 · 더블탭: 종료'))
   } finally {
     busy = false
   }
 })
 
 const started = await bridge.createStartUpPageContainer(
-  new CreateStartUpPageContainer(fullPage('출발역을 찾는 중...')))
+  new CreateStartUpPageContainer(full(S.notice('Metro', '출발역을 찾는 중', ''))))
 log('startup', started, location.href)
 await showOrigin()

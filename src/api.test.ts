@@ -41,6 +41,8 @@ test('parseArrivals는 방면 역을 뽑는다', () => {
   assert.equal(a.trainNo, '0146')
   assert.equal(a.toward, '시청', '"광운대행 - 시청방면"의 방면은 시청입니다')
   assert.equal(b.toward, '공덕')
+  assert.equal(a.dest, '광운대', '행선지는 승강장 전광판이 보여주는 종착역입니다')
+  assert.equal(b.dest, '인천공항2터미널')
   assert.equal(b.etaSec, 180)
   assert.equal(b.express, true)
   assert.equal(a.line, '1호선')
