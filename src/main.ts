@@ -203,6 +203,10 @@ $<HTMLFormElement>('#add').addEventListener('submit', async e => {
   // 정확히 맞는 역이 없으면 첫 후보를 넣는다. 오타로 빈 항목이 생기지 않는다.
   await add(NAMES.includes(q) ? q : (NAMES.find(n => n.startsWith(q)) ?? q))
 })
+// 버전은 app.json에서 온다. 패키징되는 값과 같아야 문의가 왔을 때 대조할 수 있다.
+$('#version').textContent =
+  `${import.meta.env?.VITE_APP_NAME ?? 'Metro'} ${import.meta.env?.VITE_APP_VERSION ?? ''}`.trim()
+
 renderDests()
 renderHits()
 
