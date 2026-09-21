@@ -3,21 +3,19 @@ import { neighbors, nodesOf } from './stations.ts'
 export type Leg = { line: string; stops: string[] }   // stops[0] 승차역, 마지막이 하차역
 export type Plan = { from: string; to: string; legs: Leg[] }
 
-// 다익스트라. 출발 이름의 모든 노선 노드에서 시작해 도착 이름의 아무 노선 노드에 닿는다.
+// 다익스트라. 주어진 시작 노드들에서 도착 이름의 아무 노선 노드에 닿는다.
 // ponytail: 배열을 정렬해 최소값을 꺼낸다. 노드가 700개대라 힙이 필요 없다.
-export function plan(from: string, to: string): Plan | null {
-  if (from === to) return null
-  const starts = nodesOf(from)
+function search(starts: [string, number][], to: string, from: string): Plan | null {
   const goals = new Set(nodesOf(to))
   if (!starts.length || !goals.size) return null
 
   const dist = new Map<string, number>()
   const prev = new Map<string, string | null>()
   const queue: [number, string][] = []
-  for (const s of starts) {
-    dist.set(s, 0)
+  for (const [s, d] of starts) {
+    dist.set(s, d)
     prev.set(s, null)
-    queue.push([0, s])
+    queue.push([d, s])
   }
 
   let end: string | null = null
@@ -52,7 +50,36 @@ export function plan(from: string, to: string): Plan | null {
     else legs.push({ line, stops: [name] })
   }
   // 환승역 하나만 남은 꼬리 구간은 버린다 (도착지가 환승역일 때 생긴다)
-  return { from, to, legs: legs.filter(l => l.stops.length > 1) }
+  const kept = legs.filter(l => l.stops.length > 1)
+  return kept.length ? { from, to, legs: kept } : null
+}
+
+export function plan(from: string, to: string): Plan | null {
+  if (from === to) return null
+  return search(nodesOf(from).map(n => [n, 0] as [string, number]), to, from)
+}
+
+// 그 노선을 타고 출발하는 경로. 어느 노선으로 떠날지 사용자가 고를 때 쓴다.
+// 출발역에서 바로 갈아타는 것을 막으려고, 그 노선의 이웃 역에서 출발한다.
+// 그러지 않으면 다익스트라가 출발역에서 곧장 환승해 다른 노선 경로를 돌려준다.
+export function planVia(from: string, to: string, line: string): Plan | null {
+  if (from === to) return null
+  const head = `${line}|${from}`
+  const starts = neighbors(head)
+    .filter(e => e.w === 1 && e.to.startsWith(`${line}|`))
+    .map(e => [e.to, e.w] as [string, number])
+  if (!starts.length) return null
+  // 도착지가 바로 옆 역이면 한 구간으로 끝난다
+  if (starts.some(([n]) => nodesOf(to).includes(n))) {
+    return { from, to, legs: [{ line, stops: [from, to] }] }
+  }
+  const p = search(starts, to, from)
+  if (!p || p.legs[0].line !== line) return null
+  p.legs[0].stops.unshift(from)
+  // 한 정거장 나갔다 되돌아오는 경로는 버린다.
+  // 그 노선으로 가도 소용이 없다는 뜻이고, 화면에 내밀면 사용자를 헷갈리게 한다.
+  if (p.legs[0].stops[p.legs[0].stops.length - 1] === from) return null
+  return p
 }
 
 export function stopsLeft(stops: string[], current: string): number {

@@ -5,9 +5,9 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
-import { plan, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
+import { plan, planVia, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
 import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
-import { arrivals, positions, remoteLog, type Arrival } from './api.ts'
+import { arrivals, positions, remoteLog, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 
@@ -207,11 +207,12 @@ renderHits()
 
 // ---------- 상태 ----------
 
-type Mode = 'origin' | 'dest' | 'pick' | 'riding' | 'transfer' | 'arrived'
+type Mode = 'origin' | 'dest' | 'line' | 'pick' | 'riding' | 'transfer' | 'arrived'
 let mode: Mode = 'origin'
 let rows: string[] = []      // 목록의 각 행이 뜻하는 값
 let origin = ''
 let trip: Plan | null = null
+let options: Plan[] = []     // 출발 노선이 다른 경로 후보
 let legIndex = 0
 let stops: string[] = []
 let train: Arrival | null = null
@@ -238,7 +239,22 @@ const restMinutes = (from: number, pace = DEFAULT_PACE_MS) =>
     + (trip!.legs.length - 1 - from) * TRANSFER_MIN)
 
 const GPS_TIMEOUT_MS = 5000
-const POLL_MS = 10_000
+// 서울 API는 하루 1000건이 한도다(ERROR-337). 10초 폴링은 시간당 360건이라 두 번 타면 바닥난다.
+// 상황에 따라 주기를 바꾼다. 급한 순간에만 자주 본다.
+//   하차 2정거장 이내  15초  내려야 할 때를 놓치면 안 된다
+//   열차 기다리는 중    20초  도착 예정이 줄어드는 것을 봐야 한다
+//   그 밖의 주행 중     35초  역 사이가 보통 2분이라 충분하다
+// 40분 주행 한 번에 약 80건이다. 하루 왕복이 200건 안쪽이다.
+const POLL_NEAR_MS = 15_000
+const POLL_WAIT_MS = 20_000
+const POLL_FAR_MS = 35_000
+
+function pollDelay(): number {
+  if (!fixes.length) return POLL_WAIT_MS
+  const g = locate(stops, fixes, Date.now())
+  if (!g) return POLL_WAIT_MS
+  return stopsLeft(stops, stops[g.index]) <= 2 ? POLL_NEAR_MS : POLL_FAR_MS
+}
 const leg = () => trip!.legs[legIndex]
 const toward = () => leg().stops[leg().stops.length - 1]
 
@@ -250,13 +266,16 @@ function stopPolling(): void {
 
 // ---------- 출발역 ----------
 
+let gpsRough = false   // 오차가 커서 목록 순서를 믿기 어려운 상태
+
 async function locateOnce(): Promise<Near[]> {
   const loc = await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
   log('gps', loc?.latitude, loc?.longitude, 'acc', loc?.accuracy)
   if (!loc || !Number.isFinite(loc.latitude)) return []
-  // 오차가 크면 목록 순서를 믿을 수 없다. GPS를 버린다.
-  if ((loc.accuracy ?? 0) > MAX_ACCURACY_M) return []
-  return nearest(loc.latitude, loc.longitude, COORDS, 8)
+  // 오차가 커도 버리지 않는다. 실내나 지하에서는 1km를 넘는 것이 흔하다.
+  // 버리면 사용자에게 아무것도 남지 않는다. 후보를 더 주고 불확실하다고 말한다.
+  gpsRough = (loc.accuracy ?? 0) > MAX_ACCURACY_M
+  return nearest(loc.latitude, loc.longitude, COORDS, gpsRough ? 12 : 8)
 }
 
 // 첫 호출이 null을 주는 것을 실기기에서 봤다. 한 번 더 부른다.
@@ -282,7 +301,8 @@ async function showOrigin(): Promise<void> {
   const names = [...near.map(n => n.name), ...recents.filter(r => !near.some(n => n.name === r))]
   if (!names.length) {
     rows = []
-    return show(S.notice(Date.now(), '출발역을 찾지 못했습니다', '폰에서 자주 가는 곳을 먼저 넣으세요', '탭: 다시 시도\n  더블탭: 종료'))
+    return show(S.notice(Date.now(), '출발역을 찾지 못했습니다',
+      '위치 권한을 켜거나, 폰에서 자주 가는 곳을 넣으세요', '탭: 다시 시도\n  더블탭: 종료'))
   }
   const meters = new Map(near.map(n => [n.name, n.meters]))
   rows = names
@@ -290,9 +310,12 @@ async function showOrigin(): Promise<void> {
     const m = meters.get(n)
     return m === undefined ? `${lineLabel(n)}  최근` : `${lineLabel(n)}  ${m}m`
   })
+  // 안내행은 고를 수 없어야 한다. rows의 빈 문자열이 onTap을 다시 시도로 보낸다.
   if (!near.length) {
-    // 안내행은 고를 수 없어야 한다. rows의 빈 문자열이 onTap을 다시 시도로 보낸다.
     items.unshift('위치를 찾지 못했습니다 · 최근 출발역')
+    rows = ['', ...names]
+  } else if (gpsRough) {
+    items.unshift('위치가 정확하지 않습니다 · 직접 고르세요')
     rows = ['', ...names]
   }
   if (!(await showList(items))) {
@@ -323,13 +346,51 @@ async function showDest(): Promise<void> {
   }
 }
 
-async function startTrip(dest: string): Promise<void> {
-  trip = plan(origin, dest)
-  if (!trip || !trip.legs.length) {
+// 출발역에 노선이 여럿이면 어느 노선으로 떠날지 사용자가 고른다.
+// 최단 경로만 내밀면 "호선을 지맘대로 고른다"는 말을 듣는다.
+function routeOptions(dest: string): Plan[] {
+  const seen = new Set<string>()
+  const out: Plan[] = []
+  for (const line of transferLines(origin)) {
+    const p = planVia(origin, dest, line)
+    if (!p) continue
+    const key = p.legs.map(l => `${l.line}:${l.stops.length}`).join('/')
+    if (seen.has(key)) continue
+    seen.add(key)
+    out.push(p)
+  }
+  // 빠른 것부터. 정거장 수에 환승 시간을 더해 견준다.
+  return out.sort((a, b) => tripMinutes(a) - tripMinutes(b))
+}
+
+async function chooseRoute(dest: string): Promise<void> {
+  options = routeOptions(dest)
+  if (!options.length) {
     mode = 'dest'
     rows = []
+    // 실시간 미지원 노선(인천·김포·용인·의정부)의 역은 그래프에 없어서 여기로 온다
     return show(S.notice(Date.now(), '경로를 찾지 못했습니다', `${origin} → ${dest}`, '탭: 도착지 다시 고르기'))
   }
+  if (options.length === 1) return startTrip(options[0])
+
+  mode = 'line'
+  rows = options.map(p => p.legs[0].line)
+  const items = S.rows(rows, line => {
+    const p = options.find(o => o.legs[0].line === line)!
+    return p.legs.length > 1
+      ? `${tripStops(p)}정거장 · 환승 ${p.legs.length - 1} · 약 ${tripMinutes(p)}분`
+      : `${tripStops(p)}정거장 · 직통 · 약 ${tripMinutes(p)}분`
+  })
+  log('options', rows.join(','), '|', items.join(' / '))
+  if (!(await showList(items))) {
+    rows = []
+    await show(S.notice(Date.now(), '노선 목록을 표시하지 못했습니다', '', '탭: 도착지 다시 고르기'))
+  }
+}
+
+async function startTrip(picked: Plan): Promise<void> {
+  trip = picked
+  const dest = picked.to
   await rememberOrigin(origin)
   log('plan', origin, '->', dest, trip.legs.map(l => `${l.line}[${l.stops.slice(0, 3).join('·')}…${l.stops[l.stops.length - 1]}]`).join(' ▶ '))
   await show(S.route({
@@ -356,7 +417,15 @@ async function showPick(autoBoard = true): Promise<void> {
   const from = stops[0]
   // 조회에 시간이 걸린다. 탭이 먹혔다는 것을 먼저 보여준다.
   await show(S.notice(Date.now(), `${from}`, `${leg().line} 도착 열차를 확인합니다`, '잠시만 기다리세요'))
-  const all = await arrivals(from)
+  let all: Arrival[]
+  try {
+    all = await arrivals(from)
+  } catch (e) {
+    log('arrivals failed', e)
+    rows = []
+    if (e instanceof ApiError) return show(S.notice(Date.now(), e.message, '자정에 초기화됩니다', '탭: 다시 확인'))
+    return show(S.notice(Date.now(), '도착 정보를 받지 못했습니다', String(e), '탭: 다시 확인'))
+  }
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
   // 방향은 "…방면" 역이 다음 역과 같은지로 가른다.
   // "…방면"은 급행이든 일반이든 인접한 다음 역이다. updnLine은 읽지 않는다.
@@ -436,10 +505,17 @@ async function poll(gen: number): Promise<void> {
       }
     } catch (e) {
       log('poll failed', e)   // 일시적 실패는 화면을 바꾸지 않는다. render가 추정으로 처리한다
+      if (e instanceof ApiError) {
+        // 한도 소진 같은 것은 기다려도 낫지 않는다. 숨기지 않고 말한다.
+        stopPolling()
+        mode = 'arrived'
+        rows = []
+        return show(S.notice(Date.now(), e.message, '자정에 초기화됩니다', '탭: 처음으로\n  더블탭: 종료'))
+      }
     }
     await render()
   }
-  if (gen === pollGen && mode === 'riding') pollTimer = setTimeout(() => poll(gen), POLL_MS)
+  if (gen === pollGen && mode === 'riding') pollTimer = setTimeout(() => poll(gen), pollDelay())
 }
 
 async function render(): Promise<void> {
@@ -545,7 +621,11 @@ async function onTap(index: number): Promise<void> {
   if (mode === 'dest') {
     const pick = rows[index]
     if (!pick) return showOrigin()
-    return startTrip(pick)
+    return chooseRoute(pick)
+  }
+  if (mode === 'line') {
+    const p = options.find(o => o.legs[0].line === rows[index])
+    return p ? startTrip(p) : showDest()
   }
   if (mode === 'pick') {
     const a = picks.find(p => p.trainNo === rows[index])

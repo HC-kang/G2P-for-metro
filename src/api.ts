@@ -39,9 +39,38 @@ const toMs = (s: string): number => {
   return Number.isFinite(t) ? t : Date.now()
 }
 
+// 서울 API는 오류도 HTTP 200에 본문으로 준다. 목록이 없다고 빈 배열로 넘기면
+// "도착 정보가 없습니다"로 둔갑해 원인을 숨긴다. 코드를 읽고 말해 준다.
+// 생성자 파라미터 프로퍼티는 node --test의 타입 제거 모드가 거부한다. 평범한 필드로 둔다.
+export class ApiError extends Error {
+  code: string
+  constructor(code: string, message: string) {
+    super(message)
+    this.code = code
+  }
+}
+
+const CODE_MESSAGE: Record<string, string> = {
+  'ERROR-337': '오늘 조회 한도(1000건)를 다 썼습니다',
+  'ERROR-338': 'API key가 실시간 서비스를 쓸 수 없습니다',
+  'ERROR-336': '요청 건수가 한도를 넘었습니다',
+  'ERROR-335': '샘플 key로는 5건만 볼 수 있습니다',
+  'ERROR-300': '필수 값이 빠졌습니다',
+  'ERROR-500': '서울 API 서버 오류입니다',
+  'ERROR-600': '서울 API 서버 오류입니다',
+}
+
 const rows = (body: unknown, key: string): Record<string, string>[] => {
-  const list = (body as Record<string, unknown> | null)?.[key]
-  return Array.isArray(list) ? (list as Record<string, string>[]) : []
+  const b = body as Record<string, unknown> | null
+  const list = b?.[key]
+  if (Array.isArray(list)) return list as Record<string, string>[]
+  // INFO-200은 "지금 그 역에 올 열차가 없다"는 뜻이다. 오류가 아니다.
+  const err = (b?.errorMessage ?? b) as Record<string, string> | undefined
+  const code = String(err?.code ?? '')
+  if (code.startsWith('ERROR-')) {
+    throw new ApiError(code, CODE_MESSAGE[code] ?? `서울 API ${code}`)
+  }
+  return []
 }
 
 export function parsePositions(body: unknown): TrainPos[] {

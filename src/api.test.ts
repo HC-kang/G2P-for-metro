@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parsePositions, parseArrivals, towardOf } from './api.ts'
+import { parsePositions, parseArrivals, towardOf, ApiError } from './api.ts'
 
 // 2026-09-20 실측 응답
 const POS = {
@@ -57,9 +57,30 @@ test('towardOf는 (급행) 꼬리와 괄호 별칭을 처리한다', () => {
   assert.equal(towardOf('이상한 문자열'), '')
 })
 
-test('파서는 빈 응답과 오류 응답에 빈 배열을 준다', () => {
+test('파서는 빈 응답에 빈 배열을 준다', () => {
   assert.deepEqual(parsePositions({}), [])
   assert.deepEqual(parseArrivals({}), [])
-  assert.deepEqual(parsePositions({ status: 500, code: 'ERROR-338' }), [])
   assert.deepEqual(parseArrivals(null), [])
+})
+
+test('서울 API 오류를 삼키지 않는다', () => {
+  // 오류도 HTTP 200에 본문으로 온다. 빈 목록으로 넘기면 "도착 정보 없음"으로 둔갑한다.
+  const quota = { status: 500, code: 'ERROR-337', message: '데이터요청은 일일 호출건수 최대 1000건을 넘을 수 없습니다. ', total: 0 }
+  assert.throws(() => parsePositions(quota), (e: Error) => {
+    assert.ok(e instanceof ApiError && e.code === 'ERROR-337')
+    assert.ok(e.message.includes('1000건'), e.message)
+    return true
+  })
+  assert.throws(() => parseArrivals(quota), ApiError)
+
+  // INFO-200은 오류가 아니다. 그 역에 올 열차가 지금 없다는 뜻이다.
+  assert.deepEqual(parseArrivals({ status: 500, code: 'INFO-200', message: '해당하는 데이터가 없습니다.' }), [])
+  assert.deepEqual(parsePositions({ errorMessage: { code: 'INFO-000' } }), [])
+  assert.deepEqual(parsePositions({}), [])
+  assert.deepEqual(parseArrivals(null), [])
+})
+
+test('키 오류도 그대로 말한다', () => {
+  assert.throws(() => parsePositions({ code: 'ERROR-338', message: '해당 인증키로는 실시간 서비스를 사용할 수 없습니다.' }),
+    (e: Error) => e instanceof ApiError && e.message.includes('실시간'))
 })

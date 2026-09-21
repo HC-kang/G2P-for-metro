@@ -75,8 +75,12 @@ for (const [k, g] of groups) {
   if (CIRCULAR.has(line) && branch === '') link(g[g.length - 1], g[0])
 }
 
-// 5) 같은 이름 다른 노선을 잇는다 (환승)
-for (const g of byName.values()) {
+// 5) 같은 이름 다른 노선을 잇는다 (환승).
+// 이름만 같고 실제로는 떨어져 있는 역은 잇지 않는다. 빌드 때 좌표로 가려낸 목록이다.
+// 양평은 중앙선과 5호선이 53km 떨어져 있다. 이어 두면 엉뚱한 경로가 나온다.
+const NO_TRANSFER = new Set((data as { noTransfer?: string[] }).noTransfer ?? [])
+for (const [name, g] of byName) {
+  if (NO_TRANSFER.has(name)) continue
   for (let i = 0; i < g.length; i++) {
     for (let j = i + 1; j < g.length; j++) link(g[i], g[j], TRANSFER_COST)
   }

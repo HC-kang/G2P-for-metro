@@ -75,13 +75,19 @@ for (const s of stations) {
 }
 
 // 노선별 subwayId는 추측하지 않고 실시간 API 응답에서 직접 얻는다.
-const lines = []
+// 이미 아는 노선 ID를 먼저 싣는다. 실시간 API는 하루 1000건 한도라(ERROR-337)
+// 한도를 쓴 날에는 조회가 전부 실패한다. 그때 표를 잃으면 안 된다.
+const prev = existsSync('src/stations.json')
+  ? JSON.parse(readFileSync('src/stations.json', 'utf8'))
+  : {}
+const lines = [...(prev.lines ?? [])]
 const lineNames = [...new Set(stations.map(s => s.line))]
 if (!RT_KEY) {
   console.warn('SEOUL_RT_KEY가 없습니다. lines를 비운 채로 저장합니다. 실시간 키를 받은 뒤 다시 돌리세요.')
 } else {
+  const haveId = new Set(lines.map(l => l.name))
   for (const name of lineNames) {
-    if (NO_REALTIME.includes(name)) continue
+    if (NO_REALTIME.includes(name) || haveId.has(name)) continue
     const url = `http://swopenapi.seoul.go.kr/api/subway/${RT_KEY}/json/realtimePosition/0/1/${encodeURIComponent(name)}`
     try {
       const row = (await json(url)).realtimePositionList?.[0]
@@ -113,6 +119,34 @@ for (const r of geoRows) {
   if (!coordMap.has(name)) coordMap.set(name, { name, lat, lon })
 }
 const coords = [...coordMap.values()]
+
+// 이름만 같고 실제로는 환승이 안 되는 역을 좌표로 가려낸다.
+// subwayStationMaster는 노선별로 좌표를 준다. 같은 이름의 최대 거리가 멀면 별개 역이다.
+// 실측(2026-09-21): 양평 53.5km, 운정 3.6km, 신촌 715m는 별개 역이고,
+//                  서울역 510m, 잠실 401m, 동대문역사문화공원 343m는 진짜 환승이다.
+const TRANSFER_MAX_M = 600
+const spread = new Map()
+for (const r of geoRows) {
+  const name = String(r.BLDN_NM).replace(/\(.*\)$/, '')
+  const lat = Number(r.LAT), lon = Number(r.LOT)
+  if (!name || !Number.isFinite(lat) || !Number.isFinite(lon)) continue
+  ;(spread.get(name) ?? spread.set(name, []).get(name)).push([lat, lon])
+}
+const metres = (a, b) => {
+  const p = Math.PI / 180
+  const h = Math.sin((b[0] - a[0]) * p / 2) ** 2 +
+    Math.cos(a[0] * p) * Math.cos(b[0] * p) * Math.sin((b[1] - a[1]) * p / 2) ** 2
+  return Math.round(2 * 6371000 * Math.asin(Math.sqrt(h)))
+}
+const noTransfer = []
+for (const [name, pts] of spread) {
+  if (pts.length < 2) continue
+  let max = 0
+  for (let i = 0; i < pts.length; i++) for (let j = i + 1; j < pts.length; j++) max = Math.max(max, metres(pts[i], pts[j]))
+  if (max > TRANSFER_MAX_M) noTransfer.push(name)
+}
+noTransfer.sort()
+console.log(`이름만 같고 환승이 안 되는 역 ${noTransfer.length}곳: ${noTransfer.join(' ')}`)
 const missing = [...new Set(stations.map(s => s.name))].filter(n => !coordMap.has(n))
 console.log(`좌표 ${coords.length}건. 좌표 없는 역 ${missing.length}개: ${missing.join(' ')}`)
 if (missing.length > 30) throw new Error('좌표 미매칭이 너무 많습니다. 이름 정규화를 확인하세요.')
@@ -124,9 +158,7 @@ if (missing.length > 30) throw new Error('좌표 미매칭이 너무 많습니�
 // 정식 표기는 이웃 역 응답의 "…방면"에 들어 있다. 한 번 훑어 표를 만든다. 추측하지 않는다.
 // 이미 아는 표기를 먼저 싣는다. 막차 뒤에 돌리면 도착 열차가 없어 대부분 실패하는데,
 // 그때 표를 통째로 잃으면 안 된다. 실행할 때마다 아는 것이 늘기만 한다.
-const arrivalNames = existsSync('src/stations.json')
-  ? (JSON.parse(readFileSync('src/stations.json', 'utf8')).arrivalNames ?? {})
-  : {}
+const arrivalNames = { ...(prev.arrivalNames ?? {}) }
 const knownBefore = Object.keys(arrivalNames).length
 if (RT_KEY) {
   const supported = new Set(lines.map(l => l.name))
@@ -181,5 +213,5 @@ if (RT_KEY) {
   console.warn('SEOUL_RT_KEY가 없어 도착 API 표기 표를 만들지 못했습니다.')
 }
 
-writeFileSync('src/stations.json', JSON.stringify({ lines, stations, coords, arrivalNames }))
+writeFileSync('src/stations.json', JSON.stringify({ lines, stations, coords, arrivalNames, noTransfer }))
 console.log(`역 ${stations.length}개, 노선 이름 ${lineNames.length}개, 노선 ID ${lines.length}개를 저장했습니다.`)
