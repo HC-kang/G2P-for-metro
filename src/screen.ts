@@ -35,6 +35,13 @@ export function rows(names: string[], meta: (n: string) => string): string[] {
   return fitsAll(rich) ? rich : fitItems(names)
 }
 
+// 곁가지를 여러 단계로 줄인다. 자세한 것부터 넣어 보고, 넘치면 다음 단계로 내려간다.
+// 글자를 중간에서 자르면 '온수행 급행'이 '온수행 급'이 되어 뜻이 바뀐다.
+export function tiers(...levels: string[][]): string[] {
+  for (const level of levels) if (fitsAll(level)) return level
+  return fitItems(levels[levels.length - 1])
+}
+
 // 시각. 화면마다 보여주므로 순수 함수로 두고 테스트에서 고정값을 넣는다.
 export const hhmm = (ms: number): string => {
   const d = new Date(ms)
@@ -147,8 +154,8 @@ export function transfer(a: { now: number; station: string; from: string; to: st
   return screen(
     head(a.now, '환승'), '', `${IN}${hero(a.station, 6)}`, '',
     `${PAD}${a.from} → ${a.to}`,
-    ...pair(`${a.toward} 방면`, `${a.rest}정거장`),
-    `${PAD}${hhmm(a.now + a.minutes * 60_000)} 도착 예정`, '',
+    `${PAD}${a.toward} 방면 승강장으로`,
+    ...pair(`남은 ${a.rest}정거장 ·`, `${hhmm(a.now + a.minutes * 60_000)} 도착 예정`), '',
     `${PAD}탭: 다음 열차 고르기`,
   )
 }
@@ -172,7 +179,7 @@ export function waiting(a: { now: number; line: string; toward: string; at: stri
 export function lost(a: { now: number; last: string; agoSec: number; guess: string; dest: string; stopsLeft: number; bar: string }): string {
   return screen(
     head(a.now, '신호 끊김'),
-    `${PAD}${a.last} 이후 ${a.agoSec}초`, '',
+    `${PAD}마지막 관측  ${a.last}  ${ago(a.agoSec)}`, '',
     `${PAD}추정   ${hero(a.guess, 12)} 부근`, '',
     `${PAD}${a.bar}`,
     ...pair(a.dest, `${a.stopsLeft}정거장 남음`), '',
@@ -184,7 +191,7 @@ export function lost(a: { now: number; last: string; agoSec: number; guess: stri
 export function route(a: {
   now: number; from: string; to: string
   legs: { line: string; stops: string[] }[]
-  stops: number; minutes: number
+  stops: number; minutes: number; quota?: string
 }): string {
   const body = a.legs.map((l, i) =>
     (i ? `${PAD}${PAD}▸ ${l.stops[0]} 환승\n` : '') + `${PAD}${l.line}  ${l.stops.length - 1}정거장`,
@@ -195,6 +202,7 @@ export function route(a: {
     `${PAD}${a.stops}정거장 · ${hhmm(a.now + a.minutes * 60_000)} 도착 예정`, '',
     ...body, '',
     `${PAD}열차를 확인하는 중`,
+    a.quota ? `${PAD}${a.quota}` : null,
   )
 }
 

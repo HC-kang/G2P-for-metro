@@ -118,7 +118,8 @@ test('alight는 남은 정거장에 따라 말을 바꾼다', () => {
 test('transfer는 환승 뒤 남은 여정을 보여준다', () => {
   const s = transfer()
   assert.ok(s.includes('3호선') && s.includes('경복궁'))
-  assert.ok(s.includes('3정거장') && s.includes('18:52 도착 예정'), s)
+  assert.ok(s.includes('남은 3정거장') && s.includes('18:52 도착 예정'), s)
+  assert.ok(s.includes('방면 승강장으로'), s)
   ok(s, 'transfer')
 })
 
@@ -175,4 +176,25 @@ test('실제 경로로 만든 화면이 모두 한도를 지킨다', async () =>
     ok(S.alight({ now: T, stopsLeft: 2, dest: legDest, next: leg.stops[1], minutes: 4 }), `alight ${a}→${b}`)
     ok(S.arrived(T, p.to), `arrived ${a}→${b}`)
   }
+})
+
+test('tiers는 자르지 않고 단계를 내린다', () => {
+  const full = ['3분  공릉방면  석남행 급행', '8분  중계방면  장암행']
+  assert.deepEqual(S.tiers(full, ['x']), full)   // 들어가면 그대로
+
+  // 20개가 들어가지 않으면 다음 단계로 내려간다. 글자를 자르지 않는다.
+  const long = Array.from({ length: 20 }, () => '12분  동대문역사문화공원방면  인천공항2터미널행 급행')
+  const mid = Array.from({ length: 20 }, () => '12분  동대문역사문화공원방면')
+  const out = S.tiers(long, mid)
+  assert.deepEqual(out, mid)
+  assert.ok(S.fitsAll(out))
+  assert.ok(out.every(r => r.endsWith('방면')), '중간에서 잘린 항목이 있습니다')
+})
+
+test('route 화면은 한도 경고를 붙일 수 있다', () => {
+  const p = { now: T, from: '잠실', to: '강남', legs: [{ line: '2호선', stops: ['잠실', '강남'] }], stops: 1, minutes: 2 }
+  assert.ok(!S.route(p).includes('오늘 조회'))
+  const warned = S.route({ ...p, quota: '오늘 조회 850/1000' })
+  assert.ok(warned.includes('850/1000'), warned)
+  ok(warned, 'route 경고')
 })

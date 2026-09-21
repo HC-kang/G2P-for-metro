@@ -33,10 +33,14 @@ export const destOf = (trainLineNm: string): string => {
   return m ? m[1].replace(/\(.*?\)/g, '').trim() : ''
 }
 
-// "2026-09-20 18:38:29" -> epoch ms. 기기와 서버가 같은 KST를 쓴다고 본다.
+// "2026-09-20 18:38:29" -> epoch ms. 서버는 KST로 준다.
+// 기기 시간대가 KST가 아니면 몇 시간씩 어긋나 "3시간 전" 같은 거짓말이 나온다.
+// 10분 넘게 어긋나면 파싱을 믿지 않고 받은 시각을 쓴다.
+const SANE_MS = 10 * 60_000
 const toMs = (s: string): number => {
   const t = Date.parse(String(s).replace(' ', 'T'))
-  return Number.isFinite(t) ? t : Date.now()
+  const now = Date.now()
+  return Number.isFinite(t) && Math.abs(now - t) < SANE_MS ? t : now
 }
 
 // 서울 API는 오류도 HTTP 200에 본문으로 준다. 목록이 없다고 빈 배열로 넘기면
