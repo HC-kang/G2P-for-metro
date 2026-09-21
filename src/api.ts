@@ -113,6 +113,21 @@ export const remoteLog = (msg: string): void => {
   }).catch(() => {})
 }
 
+// 기록 묶음을 보낸다. 성공 여부를 돌려주므로 화면이 사실대로 말할 수 있다.
+export async function sendTrail(text: string): Promise<boolean> {
+  if (!BASE) return false
+  try {
+    const res = await fetch(`${BASE}/log`, {
+      method: 'POST',
+      headers: { 'x-metro-token': TOKEN, 'Content-Type': 'text/plain' },
+      body: text.slice(0, 8000),
+    })
+    return res.ok
+  } catch {
+    return false
+  }
+}
+
 const get = async (path: string): Promise<unknown> => {
   const res = await fetch(`${BASE}${path}`, { headers: { 'x-metro-token': TOKEN } })
   if (res.status === 403) throw new Error('앱 설정이 서버와 맞지 않습니다')

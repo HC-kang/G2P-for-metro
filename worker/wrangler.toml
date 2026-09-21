@@ -8,3 +8,10 @@ workers_dev = true
 # secret은 파일에 두지 않는다. wrangler secret put 으로 넣는다.
 #   npx wrangler secret put SEOUL_RT_KEY
 #   npx wrangler secret put METRO_TOKEN
+
+# 로그를 Cloudflare가 보존한다. 저장소(KV/D1) 바인딩이 필요 없다.
+# wrangler tail은 실시간 스트림이라 붙어 있지 않으면 로그가 사라진다.
+# 이것을 켜면 대시보드와 `wrangler tail --format json` 없이도 나중에 조회할 수 있다.
+[observability]
+enabled = true
+head_sampling_rate = 1

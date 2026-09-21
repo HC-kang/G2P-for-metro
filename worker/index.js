@@ -27,7 +27,9 @@ export default {
     // 여기로 보내면 `npx wrangler tail`로 어디서든 본다. 저장하지 않는다.
     if (request.method === 'POST' && new URL(request.url).pathname === '/log') {
       if (request.headers.get('x-metro-token') !== env.METRO_TOKEN) return reply('forbidden', 403)
-      console.log('[device]', (await request.text()).slice(0, 500))
+      // 덤프도 받는다. 한 줄이 길면 대시보드에서 잘리므로 줄 단위로 나눠 찍는다.
+      const text = (await request.text()).slice(0, 8000)
+      for (const line of text.split('\n')) if (line.trim()) console.log('[device]', line.slice(0, 600))
       return reply(null, 204)
     }
 

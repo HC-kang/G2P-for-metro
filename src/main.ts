@@ -7,18 +7,30 @@ import {
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
 import { plan, planVia, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
 import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
-import { arrivals, positions, remoteLog, ApiError, type Arrival } from './api.ts'
+import { arrivals, positions, remoteLog, sendTrail, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 
+// 최근 기록을 앱 안에 모아 둔다. wrangler tail은 붙어 있을 때만 받으므로
+// 혼자 탈 때 생긴 일을 놓친다. 폰 화면에서 읽고 보낼 수 있어야 한다.
+const LOG_KEEP = 120
+const trail: string[] = []
+
+const stamp = () => new Date().toTimeString().slice(0, 8)
+
 const log = (...a: unknown[]) => {
   const msg = a.map(String).join(' ')
+  trail.push(`${stamp()} ${msg}`.slice(0, 300))
+  if (trail.length > LOG_KEEP) trail.shift()
   // 같은 Wi-Fi에 있을 때는 dev server 터미널에, 아닐 때도 볼 수 있게 워커에도 보낸다.
   if (import.meta.env?.DEV) navigator.sendBeacon('/__log', msg)
   remoteLog(msg)
 }
-window.addEventListener('error', e => log('error', e.message))
-window.addEventListener('unhandledrejection', e => log('rejection', e.reason))
+
+// 화면이 죽으면 메모리 기록도 사라진다. 그 직전 것이 가장 쓸모 있으므로 남긴다.
+const keepTrail = () => bridge.setLocalStorage('trail', trail.slice(-LOG_KEEP).join('\n'))
+window.addEventListener('error', e => { log('error', e.message); void keepTrail() })
+window.addEventListener('unhandledrejection', e => { log('rejection', e.reason); void keepTrail() })
 
 const bridge = await waitForEvenAppBridge()
 
@@ -203,6 +215,31 @@ $<HTMLFormElement>('#add').addEventListener('submit', async e => {
   // 정확히 맞는 역이 없으면 첫 후보를 넣는다. 오타로 빈 항목이 생기지 않는다.
   await add(NAMES.includes(q) ? q : (NAMES.find(n => n.startsWith(q)) ?? q))
 })
+// 진단 기록. 지난 실행에서 남긴 것도 함께 보여준다.
+const logView = $<HTMLPreElement>('#logview')
+const sentEl = $('#sent')
+const prevTrail = (await bridge.getLocalStorage('trail')) ?? ''
+
+function renderTrail(): void {
+  const lines = [
+    ...(prevTrail ? ['── 지난 실행 ──', prevTrail] : []),
+    ...(trail.length ? ['── 이번 실행 ──', ...trail] : []),
+  ]
+  logView.textContent = lines.length ? lines.join('\n') : '기록이 없습니다.'
+  logView.scrollTop = logView.scrollHeight
+}
+
+$('#refresh').addEventListener('click', () => { void keepTrail(); renderTrail() })
+$('#send').addEventListener('click', async () => {
+  sentEl.textContent = '보내는 중...'
+  const head = `-- ${import.meta.env?.VITE_APP_NAME ?? 'Metro'} ${import.meta.env?.VITE_APP_VERSION ?? ''} `
+    + `| ${new Date().toISOString()} | 조회 ${used}/${QUOTA_DAY} | 도착지 ${dests.length}곳 --`
+  const ok = await sendTrail([head, prevTrail, ...trail].filter(Boolean).join('\n'))
+  sentEl.textContent = ok ? '보냈습니다.' : '보내지 못했습니다. 네트워크를 확인하세요.'
+})
+$('#diag').addEventListener('toggle', renderTrail)
+renderTrail()
+
 // 버전은 app.json에서 온다. 패키징되는 값과 같아야 문의가 왔을 때 대조할 수 있다.
 $('#version').textContent =
   `${import.meta.env?.VITE_APP_NAME ?? 'Metro'} ${import.meta.env?.VITE_APP_VERSION ?? ''}`.trim()
