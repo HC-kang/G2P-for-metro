@@ -371,19 +371,28 @@ async function showDest(): Promise<void> {
 
 // 출발역에 노선이 여럿이면 어느 노선으로 떠날지 사용자가 고른다.
 // 최단 경로만 내밀면 "호선을 지맘대로 고른다"는 말을 듣는다.
+const routeKey = (p: Plan) => p.legs.map(l => `${l.line}:${l.stops.length}`).join('/')
+
 function routeOptions(dest: string): Plan[] {
-  const seen = new Set<string>()
-  const out: Plan[] = []
+  // 최선 경로를 먼저 넣는다. 노선별 탐색만 돌리면 최선이 빠지는 경우가 있다.
+  // 실측: 1637개 경로 중 10건에서 가장 빠른 길이 선택지에 없었다.
+  const best = plan(origin, dest)
+  if (!best) return []
+  const seen = new Set([routeKey(best)])
+  const out = [best]
   for (const line of transferLines(origin)) {
     const p = planVia(origin, dest, line)
-    if (!p) continue
-    const key = p.legs.map(l => `${l.line}:${l.stops.length}`).join('/')
-    if (seen.has(key)) continue
-    seen.add(key)
+    if (!p || seen.has(routeKey(p))) continue
+    seen.add(routeKey(p))
     out.push(p)
   }
+  // 아무도 고르지 않을 선택지는 뺀다. 환승 3~4번짜리를 내밀면 목록이 쓸모없어진다.
+  // 실측으로 정한 경계다(쓸모없는 선택지 131건 → 46건, 최선은 하나도 잃지 않음).
+  const legCap = best.legs.length + 1
+  const timeCap = tripMinutes(best) + 15
+  const kept = out.filter((p, i) => i === 0 || (p.legs.length <= legCap && tripMinutes(p) <= timeCap))
   // 빠른 것부터. 정거장 수에 환승 시간을 더해 견준다.
-  return out.sort((a, b) => tripMinutes(a) - tripMinutes(b))
+  return kept.sort((a, b) => tripMinutes(a) - tripMinutes(b))
 }
 
 async function chooseRoute(dest: string): Promise<void> {

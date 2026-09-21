@@ -100,3 +100,15 @@ export const lineName = (subwayId: string): string => byId.get(subwayId) ?? ''
 // 표에 없으면 그대로 쓴다. 그러면 도착 정보가 비고, 화면이 그렇게 말한다.
 const apiNames = new Map<string, string>(Object.entries((data as { arrivalNames?: Record<string, string> }).arrivalNames ?? {}))
 export const arrivalName = (station: string): string => apiNames.get(station) ?? station
+
+// 조회가 비었을 때 한 번 더 시도할 이름. 좌표표의 괄호 이름과 문장부호 변형이다.
+// 4·19민주묘지를 도착 API는 4.19민주묘지로 쓴다.
+const altMap = new Map<string, string>(Object.entries((data as { altNames?: Record<string, string> }).altNames ?? {}))
+export function altArrivalNames(station: string): string[] {
+  const out: string[] = []
+  const alt = altMap.get(station)
+  if (alt && alt !== arrivalName(station)) out.push(alt)
+  const dotted = station.replace(/·/g, '.')
+  if (dotted !== station) out.push(dotted)
+  return out
+}

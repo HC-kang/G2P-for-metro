@@ -1,4 +1,4 @@
-import { lineName, arrivalName } from './stations.ts'
+import { lineName, arrivalName, altArrivalNames } from './stations.ts'
 
 // 두 API가 같은 역을 다르게 쓴다. 위치는 '군자(능동)', 역 목록은 '군자'다.
 // 비교할 때는 양쪽에서 괄호를 뗀다.
@@ -123,6 +123,15 @@ const get = async (path: string): Promise<unknown> => {
 export const positions = async (line: string): Promise<TrainPos[]> =>
   parsePositions(await get(`/position/${encodeURIComponent(line)}`))
 
-// 도착 API는 자기 표기로만 받는다. '공릉'은 404, '공릉(서울산업대입구)'는 200이다.
-export const arrivals = async (station: string): Promise<Arrival[]> =>
-  parseArrivals(await get(`/arrival/${encodeURIComponent(arrivalName(station))}`))
+// 도착 API는 자기 표기로만 받는다. '공릉'은 데이터 없음, '공릉(서울산업대입구)'는 정상이다.
+// 빌드 때 만든 표에 없으면 예비 이름으로 한 번 더 시도한다.
+// 한도가 아까우므로 비었을 때만, 그것도 한 번만 더 부른다.
+export async function arrivals(station: string): Promise<Arrival[]> {
+  const first = parseArrivals(await get(`/arrival/${encodeURIComponent(arrivalName(station))}`))
+  if (first.length) return first
+  for (const alt of altArrivalNames(station)) {
+    const retry = parseArrivals(await get(`/arrival/${encodeURIComponent(alt)}`))
+    if (retry.length) return retry
+  }
+  return first
+}

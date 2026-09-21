@@ -138,6 +138,15 @@ const metres = (a, b) => {
     Math.cos(a[0] * p) * Math.cos(b[0] * p) * Math.sin((b[1] - a[1]) * p / 2) ** 2
   return Math.round(2 * 6371000 * Math.asin(Math.sqrt(h)))
 }
+// 좌표표의 괄호 이름을 예비 별칭으로 둔다. 도착 API 표기와 다를 수 있지만
+// 조회가 비었을 때 한 번 더 시도할 후보로는 값어치가 있다. API 호출이 들지 않는다.
+const altNames = {}
+for (const r of geoRows) {
+  const full = String(r.BLDN_NM)
+  const bare = full.replace(/\(.*\)$/, '')
+  if (full !== bare && bare) altNames[bare] = full
+}
+
 const noTransfer = []
 for (const [name, pts] of spread) {
   if (pts.length < 2) continue
@@ -165,12 +174,20 @@ if (RT_KEY) {
   const targets = [...new Set(stations.filter(s => supported.has(s.line)).map(s => s.name))]
   const canonical = new Map()   // 괄호 뗀 이름 -> 도착 API 표기
   const failed = []
+  const bare = n => n.replace(/\(.*?\)/g, '').trim()
 
   const askArrival = async name => {
     const url = `http://swopenapi.seoul.go.kr/api/subway/${RT_KEY}/json/realtimeStationArrival/0/5/${encodeURIComponent(name)}`
     try { return (await json(url)).realtimeArrivalList ?? null } catch { return null }
   }
-  const bare = n => n.replace(/\(.*?\)/g, '').trim()
+
+  // 위치 API의 statnNm도 도착 API와 같은 표기를 쓴다. 노선당 1번이면 값싸게 줍는다.
+  for (const l of lines) {
+    try {
+      const list = (await json(`http://swopenapi.seoul.go.kr/api/subway/${RT_KEY}/json/realtimePosition/0/200/${encodeURIComponent(l.name)}`)).realtimePositionList ?? []
+      for (const t of list) if (t.statnNm) canonical.set(bare(t.statnNm), t.statnNm)
+    } catch { /* 한도 소진 등. 다음 실행에서 채운다 */ }
+  }
 
   for (const name of targets) {
     if (arrivalNames[name]) continue   // 이미 아는 역은 다시 묻지 않는다
@@ -213,5 +230,5 @@ if (RT_KEY) {
   console.warn('SEOUL_RT_KEY가 없어 도착 API 표기 표를 만들지 못했습니다.')
 }
 
-writeFileSync('src/stations.json', JSON.stringify({ lines, stations, coords, arrivalNames, noTransfer }))
+writeFileSync('src/stations.json', JSON.stringify({ lines, stations, coords, arrivalNames, altNames, noTransfer }))
 console.log(`역 ${stations.length}개, 노선 이름 ${lineNames.length}개, 노선 ID ${lines.length}개를 저장했습니다.`)
