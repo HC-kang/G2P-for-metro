@@ -91,6 +91,10 @@ const context = (now: number, line: string, toward: string): string => {
   return cols(head(now, full)) <= MAX_COLS ? full : line
 }
 
+// 데이터가 얼마나 묵었는지. 폴링이 도는지 화면만 보고 알 수 있어야 한다.
+export const ago = (sec: number): string =>
+  sec < 0 ? '' : sec < 60 ? `${sec}초 전` : `${Math.floor(sec / 60)}분 전`
+
 // 열차 상태. realtimePosition의 trainSttus다. 승강장 전광판과 같은 표현이다.
 export const statusWord = (status: number): string =>
   status === 0 ? '진입' : status === 1 ? '도착' : status === 2 ? '출발' : ''
@@ -99,7 +103,7 @@ export const statusWord = (status: number): string =>
 // 노선 방면은 머리줄로 물러선다. 이미 탄 뒤에는 어디쯤인지가 더 급하다.
 export function riding(a: {
   now: number; line: string
-  at: { station: string; label: string }
+  at: { station: string; label: string; agoSec: number }
   next: string; legDest: string; stopsLeft: number; paceMs: number
   pathLen: number; index: number; estimated: number
   transfer?: { line: string; finalDest: string; finalMinutes: number }
@@ -108,7 +112,7 @@ export function riding(a: {
   return screen(
     head(a.now, a.line),
     '',
-    ...pair(a.at.station, a.at.label),
+    ...pair(a.at.station, `${a.at.label}  ${ago(a.at.agoSec)}`),
     '',
     `${PAD}다음   ${hero(a.next, 9)}`,
     '',
@@ -150,14 +154,14 @@ export function transfer(a: { now: number; station: string; from: string; to: st
 }
 
 // 고른 열차가 아직 승강장에 오지 않았다. 기다리는 동안 실제 위치를 보여준다.
-export function waiting(a: { now: number; line: string; toward: string; at: string; from: string; etaSec: number }): string {
+export function waiting(a: { now: number; line: string; toward: string; at: string; from: string; etaSec: number; agoSec: number }): string {
   const eta = a.etaSec > 0
     ? `${hhmm(a.now + a.etaSec * 1000)} 도착 · 약 ${Math.max(1, Math.round(a.etaSec / 60))}분`
     : `${a.from} 도착을 기다립니다`
   return screen(
     head(a.now, context(a.now, a.line, a.toward)), '',
     `${PAD}열차가 오는 중`, '',
-    `${PAD}현재   ${hero(a.at, 9)}`,
+    ...pair(a.at, ago(a.agoSec)),
     `${PAD}${eta}`, '',
     `${PAD}탭: 열차 다시 고르기`,
     `${PAD}더블탭: 처음으로`,

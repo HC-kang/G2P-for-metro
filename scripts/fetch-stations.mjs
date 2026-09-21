@@ -117,5 +117,69 @@ const missing = [...new Set(stations.map(s => s.name))].filter(n => !coordMap.ha
 console.log(`좌표 ${coords.length}건. 좌표 없는 역 ${missing.length}개: ${missing.join(' ')}`)
 if (missing.length > 30) throw new Error('좌표 미매칭이 너무 많습니다. 이름 정규화를 확인하세요.')
 
-writeFileSync('src/stations.json', JSON.stringify({ lines, stations, coords }))
+// 도착 API는 역 이름을 자기 표기로만 받는다. 표기가 세 가지다(2026-09-21 실측).
+//   그대로 되는 역            공릉 -> X, 강변 -> O
+//   괄호 이름이 필요한 역      총신대입구(이수)
+//   제3의 별칭을 쓰는 역       공릉 -> "공릉(서울산업대입구)" (역 목록도 좌표 데이터도 이 이름을 모른다)
+// 정식 표기는 이웃 역 응답의 "…방면"에 들어 있다. 한 번 훑어 표를 만든다. 추측하지 않는다.
+// 이미 아는 표기를 먼저 싣는다. 막차 뒤에 돌리면 도착 열차가 없어 대부분 실패하는데,
+// 그때 표를 통째로 잃으면 안 된다. 실행할 때마다 아는 것이 늘기만 한다.
+const arrivalNames = existsSync('src/stations.json')
+  ? (JSON.parse(readFileSync('src/stations.json', 'utf8')).arrivalNames ?? {})
+  : {}
+const knownBefore = Object.keys(arrivalNames).length
+if (RT_KEY) {
+  const supported = new Set(lines.map(l => l.name))
+  const targets = [...new Set(stations.filter(s => supported.has(s.line)).map(s => s.name))]
+  const canonical = new Map()   // 괄호 뗀 이름 -> 도착 API 표기
+  const failed = []
+
+  const askArrival = async name => {
+    const url = `http://swopenapi.seoul.go.kr/api/subway/${RT_KEY}/json/realtimeStationArrival/0/5/${encodeURIComponent(name)}`
+    try { return (await json(url)).realtimeArrivalList ?? null } catch { return null }
+  }
+  const bare = n => n.replace(/\(.*?\)/g, '').trim()
+
+  for (const name of targets) {
+    if (arrivalNames[name]) continue   // 이미 아는 역은 다시 묻지 않는다
+    const rows = await askArrival(name)
+    if (rows?.length) {
+      arrivalNames[name] = name
+      // 이웃 역의 정식 표기를 주워 담는다
+      for (const r of rows) {
+        const m = /-\s*(.+?)방면/.exec(r.trainLineNm ?? '')
+        if (m) canonical.set(bare(m[1]), m[1].trim())
+      }
+      for (const r of rows) if (r.statnNm) canonical.set(bare(r.statnNm), r.statnNm)
+    } else {
+      failed.push(name)
+    }
+  }
+  // 실패한 역은 주워 담은 정식 표기로 다시 시도한다.
+  // 이름이 통째로 바뀌는 경우가 있다: 이수 -> 총신대입구(이수), 응암 -> 응암순환(상선).
+  // 가운뎃점과 마침표도 섞여 쓰인다: 4·19민주묘지 -> 4.19민주묘지.
+  const norm = t => t.replace(/[·.‧]/g, '.').replace(/\s+/g, '')
+  let rescued = 0
+  for (const name of failed) {
+    const tries = new Set()
+    if (canonical.has(name)) tries.add(canonical.get(name))
+    for (const [b, full] of canonical) {
+      if (norm(b) === norm(name)) tries.add(full)
+      else if (norm(full).includes(norm(name))) tries.add(full)
+    }
+    for (const alt of tries) {
+      if (alt === name) continue
+      if ((await askArrival(alt))?.length) { arrivalNames[name] = alt; rescued += 1; break }
+    }
+  }
+  const known = Object.keys(arrivalNames).length
+  const lost = targets.filter(n => !arrivalNames[n])
+  console.log(`도착 API 표기: ${targets.length}개 중 ${known}개 확인 (이번에 새로 ${known - knownBefore}개, 별칭으로 살린 것 ${rescued}개)`)
+  if (lost.length) console.log(`  미확인 ${lost.length}개:`, lost.join(' '))
+  if (known < knownBefore) throw new Error('표가 줄었습니다. 덮어쓰지 않습니다.')
+} else {
+  console.warn('SEOUL_RT_KEY가 없어 도착 API 표기 표를 만들지 못했습니다.')
+}
+
+writeFileSync('src/stations.json', JSON.stringify({ lines, stations, coords, arrivalNames }))
 console.log(`역 ${stations.length}개, 노선 이름 ${lineNames.length}개, 노선 ID ${lines.length}개를 저장했습니다.`)

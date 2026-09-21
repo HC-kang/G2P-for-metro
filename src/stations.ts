@@ -91,3 +91,8 @@ export const stationAt = (n: string): Station | undefined => byNode.get(n)
 export const lineStations = (line: string): Station[] => byLine.get(line) ?? []
 export const transferLines = (name: string): string[] => [...new Set((byName.get(name) ?? []).map(s => s.line))]
 export const lineName = (subwayId: string): string => byId.get(subwayId) ?? ''
+
+// 도착 API가 받는 역 표기. 빌드 때 실제 응답에서 배운 표다(추측이 아니다).
+// 표에 없으면 그대로 쓴다. 그러면 도착 정보가 비고, 화면이 그렇게 말한다.
+const apiNames = new Map<string, string>(Object.entries((data as { arrivalNames?: Record<string, string> }).arrivalNames ?? {}))
+export const arrivalName = (station: string): string => apiNames.get(station) ?? station

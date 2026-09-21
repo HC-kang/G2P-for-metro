@@ -1,4 +1,8 @@
-import { lineName } from './stations.ts'
+import { lineName, arrivalName } from './stations.ts'
+
+// 두 API가 같은 역을 다르게 쓴다. 위치는 '군자(능동)', 역 목록은 '군자'다.
+// 비교할 때는 양쪽에서 괄호를 뗀다.
+export const bare = (name: string): string => name.replace(/\(.*?\)/g, '').trim()
 
 // 워커가 http 전용 원 API를 https로 중계한다. 실시간 키는 워커에 있다.
 // import.meta.env는 Vite가 채운다. node --test에는 없으므로 ?.로 받는다.
@@ -43,7 +47,7 @@ const rows = (body: unknown, key: string): Record<string, string>[] => {
 export function parsePositions(body: unknown): TrainPos[] {
   return rows(body, 'realtimePositionList').map((r): TrainPos => ({
     trainNo: String(r.trainNo ?? ''),
-    station: String(r.statnNm ?? ''),
+    station: bare(String(r.statnNm ?? '')),
     status: Number(r.trainSttus ?? 0),
     express: r.directAt === '1',
     terminal: String(r.statnTnm ?? ''),
@@ -54,7 +58,7 @@ export function parsePositions(body: unknown): TrainPos[] {
 export function parseArrivals(body: unknown): Arrival[] {
   return rows(body, 'realtimeArrivalList').map((r): Arrival => ({
     trainNo: String(r.btrainNo ?? ''),
-    station: String(r.statnNm ?? ''),
+    station: bare(String(r.statnNm ?? '')),
     line: lineName(String(r.subwayId ?? '')),
     etaSec: Number(r.barvlDt ?? 0),
     msg: String(r.arvlMsg2 ?? ''),
@@ -86,5 +90,6 @@ const get = async (path: string): Promise<unknown> => {
 export const positions = async (line: string): Promise<TrainPos[]> =>
   parsePositions(await get(`/position/${encodeURIComponent(line)}`))
 
+// 도착 API는 자기 표기로만 받는다. '공릉'은 404, '공릉(서울산업대입구)'는 200이다.
 export const arrivals = async (station: string): Promise<Arrival[]> =>
-  parseArrivals(await get(`/arrival/${encodeURIComponent(station)}`))
+  parseArrivals(await get(`/arrival/${encodeURIComponent(arrivalName(station))}`))

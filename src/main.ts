@@ -4,7 +4,7 @@ import {
   CreateStartUpPageContainer, RebuildPageContainer, OsEventTypeList,
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
-import { COORDS, NAMES, transferLines } from './stations.ts'
+import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
 import { plan, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
 import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, type Arrival } from './api.ts'
@@ -218,6 +218,7 @@ let train: Arrival | null = null
 let boardedAt = 0            // 열차를 고른 시각. 도착 예정 시간을 깎는 데 쓴다.
 let approach = ''            // 아직 승강장에 오지 않은 열차의 현재 역
 let atStatus = -1            // 마지막 관측의 trainSttus. 0 진입, 1 도착, 2 출발
+let seenAt = 0               // 마지막 관측의 보고 시각. 데이터가 얼마나 묵었는지 보여준다.
 let fixes: Fix[] = []
 let busy = false
 let pollTimer: ReturnType<typeof setTimeout> | null = null
@@ -330,7 +331,7 @@ async function startTrip(dest: string): Promise<void> {
     return show(S.notice(Date.now(), '경로를 찾지 못했습니다', `${origin} → ${dest}`, '탭: 도착지 다시 고르기'))
   }
   await rememberOrigin(origin)
-  log('plan', origin, dest, trip.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' '))
+  log('plan', origin, '->', dest, trip.legs.map(l => `${l.line}[${l.stops.slice(0, 3).join('·')}…${l.stops[l.stops.length - 1]}]`).join(' ▶ '))
   await show(S.route({
     now: Date.now(), from: trip.from, to: trip.to, legs: trip.legs,
     stops: tripStops(trip), minutes: tripMinutes(trip),
@@ -363,7 +364,9 @@ async function showPick(autoBoard = true): Promise<void> {
   // 이름 표기가 어긋나 0대가 되면 거르지 않는다.
   // "도착 정보 없음"으로 막히는 것보다 한 번 더 묻는 편이 안전하다.
   const candidates = (sameWay.length ? sameWay : sameLine).sort((a, b) => a.etaSec - b.etaSec).slice(0, 18)
-  log('candidates', candidates.length, 'sameWay', sameWay.length, 'line', sameLine.length, 'of', all.length, 'next', stops[1])
+  log('candidates', candidates.length, 'sameWay', sameWay.length, 'line', sameLine.length,
+    'of', all.length, '| 다음역', stops[1], '| 온 방면', sameLine.map(a => a.toward).join(',') || '없음',
+    '| 조회이름', arrivalName(from))
 
   if (!candidates.length) {
     rows = []
@@ -377,7 +380,8 @@ async function showPick(autoBoard = true): Promise<void> {
   rows = candidates.map(a => a.trainNo)
   const items = S.fitItems(candidates.map(a => {
     const when = a.etaSec > 0 ? `${Math.max(1, Math.round(a.etaSec / 60))}분` : '곧'
-    return `${when}  ${a.dest || a.toward}행${a.express ? ' · 급행' : ''}`
+    // 방면을 먼저 보여준다. 승강장 표지와 같은 기준이고, 방향을 그 자리에서 확인할 수 있다.
+    return `${when}  ${a.toward}방면  ${a.dest}행${a.express ? ' 급행' : ''}`
   }))
   if (!(await showList(items))) {
     rows = []
@@ -393,11 +397,12 @@ async function board(a: Arrival): Promise<void> {
   approach = ''
   fixes = []
   atStatus = -1
+  seenAt = 0
   mode = 'riding'
   log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
   await show(S.waiting({
     now: Date.now(), line: leg().line, toward: a.dest || a.toward,
-    at: '확인 중', from: stops[0], etaSec: a.etaSec,
+    at: '확인 중', from: stops[0], etaSec: a.etaSec, agoSec: -1,
   }))
   stopPolling()
   misses = 0
@@ -419,13 +424,15 @@ async function poll(gen: number): Promise<void> {
         misses = 0
         approach = ''
         atStatus = me.status
+        seenAt = me.at
         const last = fixes[fixes.length - 1]
         if (!last || last.station !== me.station) fixes.push({ station: me.station, at: me.at })
       } else {
         // 고른 열차가 아직 승강장에 오지 않았다. 오는 중이다.
         misses = 0
         approach = me.station
-        log('train approaching', me.station)
+        seenAt = me.at
+        log('train approaching', me.station, 'at', new Date(me.at).toTimeString().slice(0, 8))
       }
     } catch (e) {
       log('poll failed', e)   // 일시적 실패는 화면을 바꾸지 않는다. render가 추정으로 처리한다
@@ -448,6 +455,7 @@ async function render(): Promise<void> {
       return show(S.waiting({
         now, line: leg().line, toward: train!.dest || train!.toward,
         at: approach || '확인 중', from: stops[0], etaSec,
+        agoSec: seenAt ? Math.round((now - seenAt) / 1000) : -1,
       }))
     }
     return show(S.notice(now, `${train!.trainNo}번 열차를 찾지 못했습니다`, `${leg().line} 실시간 정보에 ${misses}회 연속 없습니다`, '탭: 열차 다시 고르기\n  더블탭: 처음으로'))
@@ -479,9 +487,10 @@ async function render(): Promise<void> {
 
   const nextLeg = trip!.legs[legIndex + 1]
   // 지금 어디인지. 관측이면 전광판과 같은 말(진입·도착·출발), 추정이면 추정이라고 말한다.
+  const agoSec = seenAt ? Math.round((now - seenAt) / 1000) : -1
   const at = guess.estimated > 0
-    ? { station: stops[guess.index], label: '부근 (추정)' }
-    : { station: stops[guess.index], label: S.statusWord(atStatus) || '통과' }
+    ? { station: stops[guess.index], label: '부근 (추정)', agoSec }
+    : { station: stops[guess.index], label: S.statusWord(atStatus) || '통과', agoSec }
   await show(S.riding({
     now, line: leg().line,
     at,
