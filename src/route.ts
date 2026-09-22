@@ -5,7 +5,7 @@ export type Plan = { from: string; to: string; legs: Leg[] }
 
 // 다익스트라. 주어진 시작 노드들에서 도착 이름의 아무 노선 노드에 닿는다.
 // ponytail: 배열을 정렬해 최소값을 꺼낸다. 노드가 700개대라 힙이 필요 없다.
-function search(starts: [string, number][], to: string, from: string): Plan | null {
+function search(starts: [string, number][], to: string, from: string, banned?: Set<string>): Plan | null {
   const goals = new Set(nodesOf(to))
   if (!starts.length || !goals.size) return null
 
@@ -25,6 +25,7 @@ function search(starts: [string, number][], to: string, from: string): Plan | nu
     if (d > (dist.get(cur) ?? Infinity)) continue
     if (goals.has(cur)) { end = cur; break }
     for (const e of neighbors(cur)) {
+      if (banned?.has(e.to)) continue
       const next = d + e.w
       if (next < (dist.get(e.to) ?? Infinity)) {
         dist.set(e.to, next)
@@ -59,27 +60,36 @@ export function plan(from: string, to: string): Plan | null {
   return search(nodesOf(from).map(n => [n, 0] as [string, number]), to, from)
 }
 
-// 그 노선을 타고 출발하는 경로. 어느 노선으로 떠날지 사용자가 고를 때 쓴다.
-// 출발역에서 바로 갈아타는 것을 막으려고, 그 노선의 이웃 역에서 출발한다.
-// 그러지 않으면 다익스트라가 출발역에서 곧장 환승해 다른 노선 경로를 돌려준다.
-export function planVia(from: string, to: string, line: string): Plan | null {
+// 첫 한 정거장을 지정해 떠나는 경로. 선택지의 단위는 노선이 아니라 (노선, 방면)이다.
+// 노선만 지정하면 양쪽 방향이 한 후보로 뭉개져 빠른 쪽만 남는다.
+// 하계에는 7호선 하나뿐인데 중계 방면과 공릉 방면은 전혀 다른 여정이다.
+export function planHop(from: string, to: string, line: string, next: string): Plan | null {
   if (from === to) return null
-  const head = `${line}|${from}`
-  const starts = neighbors(head)
-    .filter(e => e.w === 1 && e.to.startsWith(`${line}|`))
-    .map(e => [e.to, e.w] as [string, number])
-  if (!starts.length) return null
-  // 도착지가 바로 옆 역이면 한 구간으로 끝난다
-  if (starts.some(([n]) => nodesOf(to).includes(n))) {
-    return { from, to, legs: [{ line, stops: [from, to] }] }
-  }
-  const p = search(starts, to, from)
-  if (!p || p.legs[0].line !== line) return null
+  const hop = `${line}|${next}`
+  const ok = neighbors(`${line}|${from}`).some(e => e.w === 1 && e.to === hop)
+  if (!ok) return null
+  // 바로 옆 역이 목적지면 한 구간으로 끝난다
+  if (nodesOf(to).includes(hop)) return { from, to, legs: [{ line, stops: [from, to] }] }
+  // 출발역으로 되돌아가지 못하게 탐색 단계에서 막는다.
+  // 사후에 버리면 진짜 그 방향 경로를 함께 잃는다.
+  // 하계에서 공릉 방면을 고르면 다익스트라는 하계로 되돌아 4호선 타는 길이 짧다고 본다.
+  const p = search([[hop, 1]], to, from, new Set(nodesOf(from)))
+  if (!p || p.legs[0].line !== line || p.legs[0].stops[0] !== next) return null
   p.legs[0].stops.unshift(from)
-  // 한 정거장 나갔다 되돌아오는 경로는 버린다.
-  // 그 노선으로 가도 소용이 없다는 뜻이고, 화면에 내밀면 사용자를 헷갈리게 한다.
-  if (p.legs[0].stops[p.legs[0].stops.length - 1] === from) return null
   return p
+}
+
+// 출발역에서 갈 수 있는 모든 (노선, 방면). 화면의 선택지를 만들 때 쓴다.
+export function departures(from: string): { line: string; next: string }[] {
+  const out: { line: string; next: string }[] = []
+  for (const node of nodesOf(from)) {
+    const line = node.slice(0, node.indexOf('|'))
+    for (const e of neighbors(node)) {
+      if (e.w !== 1 || !e.to.startsWith(`${line}|`)) continue
+      out.push({ line, next: e.to.slice(e.to.indexOf('|') + 1) })
+    }
+  }
+  return out
 }
 
 export function stopsLeft(stops: string[], current: string): number {

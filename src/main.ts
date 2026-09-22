@@ -5,7 +5,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
-import { plan, planVia, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
+import { plan, planHop, departures, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
 import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, sendTrail, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -88,7 +88,10 @@ const parseLines = (t: string, max: number) =>
 
 let dests = parseLines((await bridge.getLocalStorage('destinations')) ?? '', MAX_DESTS)
 let recents = parseLines((await bridge.getLocalStorage('recentOrigins')) ?? '', 5)
+// 출발역·도착지마다 지난번에 고른 경로를 기억한다. 늘 같은 길로 다니는 사람이 대부분이다.
 const savedQuota = ((await bridge.getLocalStorage('quota')) ?? '').split(':')
+const prefs = new Map(((await bridge.getLocalStorage('prefs')) ?? '').split('\n')
+  .map(l => l.split('\t')).filter(v => v.length === 2) as [string, string][])
 
 const saveDests = () => bridge.setLocalStorage('destinations', dests.join('\n'))
 
@@ -222,6 +225,8 @@ const prevTrail = (await bridge.getLocalStorage('trail')) ?? ''
 
 function renderTrail(): void {
   const lines = [
+    `오늘 조회 ${used}/${QUOTA_DAY} (${usedDay}, KST 기준)`,
+    '',
     ...(prevTrail ? ['── 지난 실행 ──', prevTrail] : []),
     ...(trail.length ? ['── 이번 실행 ──', ...trail] : []),
   ]
@@ -236,6 +241,15 @@ $('#send').addEventListener('click', async () => {
     + `| ${new Date().toISOString()} | 조회 ${used}/${QUOTA_DAY} | 도착지 ${dests.length}곳 --`
   const ok = await sendTrail([head, prevTrail, ...trail].filter(Boolean).join('\n'))
   sentEl.textContent = ok ? '보냈습니다.' : '보내지 못했습니다. 네트워크를 확인하세요.'
+})
+$('#resetQuota').addEventListener('click', async () => {
+  // 폭주로 잘못 쌓인 값을 지운다. 실제 서울 API 한도는 이것과 무관하게 KST 자정에 돈다.
+  used = 0
+  recentCalls = []
+  usedDay = today()
+  await bridge.setLocalStorage('quota', `${usedDay}:0`)
+  sentEl.textContent = '조회수를 0으로 되돌렸습니다. 서울 API 실제 한도는 KST 자정에 초기화됩니다.'
+  renderTrail()
 })
 $('#diag').addEventListener('toggle', renderTrail)
 renderTrail()
@@ -254,7 +268,7 @@ let mode: Mode = 'origin'
 let rows: string[] = []      // 목록의 각 행이 뜻하는 값
 let origin = ''
 let trip: Plan | null = null
-let options: Plan[] = []     // 출발 노선이 다른 경로 후보
+let options: Plan[] = []     // 출발 방면이 다른 경로 후보
 let legIndex = 0
 let stops: string[] = []
 let train: Arrival | null = null
@@ -284,15 +298,36 @@ const restMinutes = (from: number, pace = DEFAULT_PACE_MS) =>
 // 조용히 넘기지 않으려고 직접 센다. 날짜가 바뀌면 0으로 돌아간다.
 const QUOTA_DAY = 1000
 const QUOTA_WARN = 800
-const today = () => new Date().toISOString().slice(0, 10)
+// 서울 API는 KST 자정에 초기화된다. UTC 날짜를 쓰면 오전 9시에 엉뚱하게 초기화된다.
+const today = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)
+// 1분에 이만큼 넘게 부르면 무언가 폭주한 것이다. 정상은 분당 2~4건이다.
+const BURST_PER_MIN = 10
+
 let usedDay = savedQuota[0] === today() ? savedQuota[0] : today()
 let used = savedQuota[0] === today() ? Number(savedQuota[1]) || 0 : 0
+let recentCalls: number[] = []
 
-async function counted<T>(p: Promise<T>): Promise<T> {
-  if (usedDay !== today()) { usedDay = today(); used = 0 }
+class QuotaError extends Error {}
+
+// 호출을 세고, 한도와 폭주를 막는다. 호출하기 전에 막아야 뜻이 있다.
+// 28,165건까지 올라간 적이 있다. 한도를 넘어도 계속 부르고 있었다.
+function guard(): void {
+  if (usedDay !== today()) { usedDay = today(); used = 0; recentCalls = [] }
+  const now = Date.now()
+  recentCalls = recentCalls.filter(t => now - t < 60_000)
+  if (recentCalls.length >= BURST_PER_MIN) {
+    log('burst guard', recentCalls.length, '/min')
+    throw new QuotaError(`1분에 ${recentCalls.length}번 조회했습니다`)
+  }
+  if (used >= QUOTA_DAY) throw new QuotaError(`오늘 조회 한도(${QUOTA_DAY}건)를 다 썼습니다`)
+  recentCalls.push(now)
   used += 1
   void bridge.setLocalStorage('quota', `${usedDay}:${used}`)
-  return p
+}
+
+function counted<T>(call: () => Promise<T>): Promise<T> {
+  guard()
+  return call()
 }
 
 const GPS_TIMEOUT_MS = 5000
@@ -377,7 +412,7 @@ async function showOrigin(): Promise<void> {
   }
   // 한도가 가까우면 떠나기 전에 알린다. 도중에 끊기는 것보다 낫다.
   if (used >= QUOTA_WARN) {
-    items.unshift(`오늘 조회 ${used}/${QUOTA_DAY} · 자정에 초기화`)
+    items.unshift(`오늘 조회 ${used}/${QUOTA_DAY} · KST 자정에 초기화`)
     rows = ['', ...rows]
   }
   if (!(await showList(items))) {
@@ -415,14 +450,17 @@ async function showDest(): Promise<void> {
 const routeKey = (p: Plan) => p.legs.map(l => `${l.line}:${l.stops.length}`).join('/')
 
 function routeOptions(dest: string): Plan[] {
-  // 최선 경로를 먼저 넣는다. 노선별 탐색만 돌리면 최선이 빠지는 경우가 있다.
+  // 최선 경로를 먼저 넣는다. 방면별 탐색만 돌리면 최선이 빠지는 경우가 있다.
   // 실측: 1637개 경로 중 10건에서 가장 빠른 길이 선택지에 없었다.
   const best = plan(origin, dest)
   if (!best) return []
   const seen = new Set([routeKey(best)])
   const out = [best]
-  for (const line of transferLines(origin)) {
-    const p = planVia(origin, dest, line)
+  // 선택지의 단위는 노선이 아니라 (노선, 방면)이다. 노선만 보면 양쪽 방향이
+  // 한 후보로 뭉개져 빠른 쪽만 남는다. 하계에는 7호선뿐이지만
+  // 중계 방면과 공릉 방면은 전혀 다른 여정이다.
+  for (const d of departures(origin)) {
+    const p = planHop(origin, dest, d.line, d.next)
     if (!p || seen.has(routeKey(p))) continue
     seen.add(routeKey(p))
     out.push(p)
@@ -433,7 +471,14 @@ function routeOptions(dest: string): Plan[] {
   const timeCap = tripMinutes(best) + 15
   const kept = out.filter((p, i) => i === 0 || (p.legs.length <= legCap && tripMinutes(p) <= timeCap))
   // 빠른 것부터. 정거장 수에 환승 시간을 더해 견준다.
-  return kept.sort((a, b) => tripMinutes(a) - tripMinutes(b))
+  kept.sort((a, b) => tripMinutes(a) - tripMinutes(b))
+  // 지난번에 고른 길이 있으면 맨 위로 올린다. 바꾸고 싶으면 아래를 고르면 된다.
+  const liked = prefs.get(`${origin}>${dest}`)
+  if (liked) {
+    const i = kept.findIndex(p => routeKey(p) === liked)
+    if (i > 0) kept.unshift(...kept.splice(i, 1))
+  }
+  return kept
 }
 
 async function chooseRoute(dest: string): Promise<void> {
@@ -447,14 +492,17 @@ async function chooseRoute(dest: string): Promise<void> {
   if (options.length === 1) return startTrip(options[0])
 
   mode = 'line'
-  rows = options.map(p => p.legs[0].line)
-  const items = S.rows(rows, line => {
-    const p = options.find(o => o.legs[0].line === line)!
-    return p.legs.length > 1
-      ? `${tripStops(p)}정거장 · 환승 ${p.legs.length - 1} · 약 ${tripMinutes(p)}분`
-      : `${tripStops(p)}정거장 · 직통 · 약 ${tripMinutes(p)}분`
-  })
-  log('options', rows.join(','), '|', items.join(' / '))
+  // 같은 노선이 방면만 다르게 두 번 나올 수 있다. 자리번호로 고른다.
+  rows = options.map((_, i) => String(i))
+  const liked = prefs.get(`${origin}>${dest}`)
+  const mark = (p: Plan) => (routeKey(p) === liked ? '★ ' : '')
+  const head = (p: Plan) => `${mark(p)}${p.legs[0].line} ${p.legs[0].stops[1]}방면`
+  const items = S.tiers(
+    options.map(p => `${head(p)}  ${tripStops(p)}정거장 · 환승 ${p.legs.length - 1} · 약 ${tripMinutes(p)}분`),
+    options.map(p => `${head(p)}  ${tripStops(p)}정거장 · 약 ${tripMinutes(p)}분`),
+    options.map(p => `${head(p)}  약 ${tripMinutes(p)}분`),
+  )
+  log('options', items.join(' / '))
   if (!(await showList(items))) {
     rows = []
     await show(S.notice(Date.now(), '노선 목록을 표시하지 못했습니다', '', '탭: 도착지 다시 고르기'))
@@ -465,6 +513,10 @@ async function startTrip(picked: Plan): Promise<void> {
   trip = picked
   const dest = picked.to
   await rememberOrigin(origin)
+  // 고른 길을 기억한다. 다음에 같은 구간이면 맨 위에 둔다.
+  prefs.set(`${origin}>${dest}`, routeKey(picked))
+  const flat = [...prefs].slice(-40).map(([k, v]) => `${k}\t${v}`).join('\n')
+  void bridge.setLocalStorage('prefs', flat)
   log('plan', origin, '->', dest, trip.legs.map(l => `${l.line}[${l.stops.slice(0, 3).join('·')}…${l.stops[l.stops.length - 1]}]`).join(' ▶ '))
   await show(S.route({
     now: Date.now(), from: trip.from, to: trip.to, legs: trip.legs,
@@ -493,11 +545,12 @@ async function showPick(autoBoard = true): Promise<void> {
   await show(S.notice(Date.now(), `${from}`, `${leg().line} 도착 열차를 확인합니다`, '잠시만 기다리세요'))
   let all: Arrival[]
   try {
-    all = await counted(arrivals(from))
+    all = await counted(() => arrivals(from))
   } catch (e) {
     log('arrivals failed', e)
     rows = []
-    if (e instanceof ApiError) return show(S.notice(Date.now(), e.message, '자정에 초기화됩니다', '탭: 다시 확인'))
+    if (e instanceof QuotaError) return show(S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · KST 자정에 초기화`, '탭: 다시 확인'))
+    if (e instanceof ApiError) return show(S.notice(Date.now(), e.message, 'KST 자정에 초기화됩니다', '탭: 다시 확인'))
     return show(S.notice(Date.now(), '도착 정보를 받지 못했습니다', String(e), '탭: 다시 확인'))
   }
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
@@ -561,7 +614,7 @@ async function poll(gen: number): Promise<void> {
   if (gen !== pollGen || mode !== 'riding') return
   if (!busy) {
     try {
-      const me = (await counted(positions(leg().line))).find(t => t.trainNo === train!.trainNo)
+      const me = (await counted(() => positions(leg().line))).find(t => t.trainNo === train!.trainNo)
       if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
       if (!me) {
         misses += 1
@@ -582,6 +635,12 @@ async function poll(gen: number): Promise<void> {
       }
     } catch (e) {
       log('poll failed', e)   // 일시적 실패는 화면을 바꾸지 않는다. render가 추정으로 처리한다
+      if (e instanceof QuotaError) {
+        stopPolling()
+        mode = 'arrived'
+        rows = []
+        return show(S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY}`, '탭: 처음으로\n  더블탭: 종료'))
+      }
       if (e instanceof ApiError) {
         // 한도 소진 같은 것은 기다려도 낫지 않는다. 숨기지 않고 말한다.
         stopPolling()
@@ -702,7 +761,7 @@ async function onTap(index: number): Promise<void> {
     return chooseRoute(pick)
   }
   if (mode === 'line') {
-    const p = options.find(o => o.legs[0].line === rows[index])
+    const p = options[Number(rows[index])]
     return p ? startTrip(p) : showDest()
   }
   if (mode === 'pick') {
