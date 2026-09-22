@@ -50,16 +50,21 @@ export const hhmm = (ms: number): string => {
 export const hhmmss = (ms: number): string =>
   `${hhmm(ms)}:${String(new Date(ms).getSeconds()).padStart(2, '0')}`
 
-// 갱신을 기다리는 동안 화면이 살아 있음을 보여준다. 틱마다 한 칸 돈다.
-// 남은 시간이 5초 이하면 두 칸씩 돌아 빨라진다. 곧 바뀐다는 뜻이다.
-const SPIN = ['◐', '◓', '◑', '◒']
-export type Refresh = { inSec: number; tick: number; failed: boolean }
+// 다음 갱신까지 차오르는 막대. 다 차면 갱신된다.
+// 글리프는 ━ ─ 만 쓴다. 실기기에서 보인 것이 확인된 글리프다.
+// ◐◓◑◒ 같은 것은 폰트에 없으면 조용히 빠져서 스피너가 멈춘 것처럼 보인다.
+// 초읽기는 두 자리로 고정한다. 자릿수가 바뀌면 줄이 흔들린다.
+export type Refresh = { inSec: number; totalSec: number; failed: boolean }
+// ━ ─ 는 전각이라 한 칸이 2칸을 먹는다. 7칸이면 가장 긴 문구(' 7초 뒤 재시도')까지 31칸이다.
+const BAR_CELLS = 7
 export function refreshLine(r: Refresh): string {
-  const step = r.inSec <= 5 ? 2 : 1
-  const glyph = SPIN[(r.tick * step) % SPIN.length]
   const sec = Math.max(0, r.inSec)
-  if (r.failed) return `${glyph} 갱신 실패 · ${sec}초 뒤 재시도`
-  return sec === 0 ? `${glyph} 갱신 중` : `${glyph} ${sec}초 뒤 갱신`
+  const total = Math.max(1, r.totalSec)
+  const filled = Math.min(BAR_CELLS, Math.round(((total - sec) / total) * BAR_CELLS))
+  const bar = '━'.repeat(filled) + '─'.repeat(BAR_CELLS - filled)
+  const n = String(sec).padStart(2, ' ')
+  if (r.failed) return `${bar} ${n}초 뒤 재시도`
+  return sec === 0 ? `${bar} 갱신 중` : `${bar} ${n}초 뒤 갱신`
 }
 
 // 자간을 벌려 강조한다. 크기를 못 바꾸므로 이것이 유일한 강조 수단이다.
@@ -134,7 +139,8 @@ export function riding(a: {
   return screen(
     head(a.now, a.line),
     '',
-    ...pair(`${a.at.station} ${a.at.label}`, refreshLine(a.refresh)),
+    `${PAD}${a.at.station} ${a.at.label}`,
+    `${PAD}${refreshLine(a.refresh)}`,
     '',
     `${PAD}다음   ${hero(a.next, 9)}`,
     '',
@@ -183,7 +189,8 @@ export function waiting(a: { now: number; line: string; toward: string; at: stri
   return screen(
     head(a.now, context(a.now, a.line, a.toward)), '',
     `${PAD}열차가 오는 중`, '',
-    ...pair(`현재 ${a.at}`, refreshLine(a.refresh)),
+    `${PAD}현재 ${a.at}`,
+    `${PAD}${refreshLine(a.refresh)}`,
     `${PAD}${eta}`, '',
     `${PAD}탭: 열차 다시 고르기`,
     `${PAD}더블탭: 처음으로`,

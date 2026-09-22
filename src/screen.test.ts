@@ -4,7 +4,7 @@ import * as S from './screen.ts'
 
 // 2026-09-20 18:42 KST 고정. 시각이 들어가는 화면을 결정적으로 만든다.
 const T = new Date('2026-09-20T18:42:00+09:00').getTime()
-const R = { inSec: 12, tick: 0, failed: false }
+const R = { inSec: 12, totalSec: 20, failed: false }
 
 const ok = (s: string, what: string) => {
   assert.ok(S.bytes(s) <= S.PAGE_BYTES, `${what}: ${S.bytes(s)}바이트\n${s}`)
@@ -46,18 +46,25 @@ test('ago는 데이터가 얼마나 묵었는지 말한다', () => {
   assert.equal(S.ago(-1), '')   // 아직 받은 것이 없으면 시간을 지어내지 않는다
 })
 
-test('주행 화면이 갱신 초읽기와 스피너를 보여준다', () => {
+test('주행 화면이 갱신 막대와 초읽기를 보여준다', () => {
   // 폴링이 도는지, 곧 바뀌는지 화면만 보고 알 수 있어야 한다
   assert.ok(riding().includes('12초 뒤 갱신'), riding())
   assert.ok(waiting().includes('12초 뒤 갱신'), waiting())
-  assert.ok(/[◐◓◑◒]/.test(riding()), '스피너 글리프가 있어야 합니다')
-  // 틱마다 글리프가 돈다. 5초 이하면 두 칸씩 돌아 빨라진다
-  const g = (tick: number, inSec: number) => S.refreshLine({ inSec, tick, failed: false })[0]
-  assert.notEqual(g(0, 12), g(1, 12))
-  assert.equal(g(0, 12), g(4, 12))              // 4틱에 한 바퀴
-  assert.equal(g(0, 3), g(2, 3))                // 5초 이하: 2틱에 한 바퀴
-  assert.ok(S.refreshLine({ inSec: 7, tick: 0, failed: true }).includes('갱신 실패 · 7초 뒤 재시도'))
-  assert.ok(riding({ refresh: { inSec: 0, tick: 0, failed: false } }).includes('갱신 중'))
+  // 막대는 실기기에서 보인 것이 확인된 글리프(━ ─)만 쓴다. 다 차면 갱신이다
+  const bar = (inSec: number) => S.refreshLine({ inSec, totalSec: 20, failed: false }).slice(0, 7)
+  assert.equal(bar(20), '───────')
+  assert.equal(bar(10), '━━━━───')      // 절반 지남 → 3.5 → 4칸
+  assert.equal(bar(0), '━━━━━━━')
+  assert.ok(/^[━─]{7}$/.test(bar(7)), '막대 글리프는 ━ ─ 뿐이어야 합니다: ' + bar(7))
+  // 전각 막대 7칸 + 가장 긴 문구가 32칸 안에 든다
+  assert.ok(S.cols('  ' + S.refreshLine({ inSec: 7, totalSec: 20, failed: true })) <= S.MAX_COLS)
+  // 초읽기는 두 자리 고정. 자릿수가 바뀌어도 줄이 흔들리지 않는다
+  const tail = (inSec: number) => S.refreshLine({ inSec, totalSec: 20, failed: false }).slice(7)
+  assert.equal(tail(12), ' 12초 뒤 갱신')
+  assert.equal(tail(9), '  9초 뒤 갱신')
+  assert.equal(tail(12).length, tail(9).length)
+  assert.ok(S.refreshLine({ inSec: 7, totalSec: 20, failed: true }).includes(' 7초 뒤 재시도'))
+  assert.ok(riding({ refresh: { inSec: 0, totalSec: 20, failed: false } }).includes('갱신 중'))
 })
 
 test('statusWord는 전광판과 같은 말을 쓴다', () => {

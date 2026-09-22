@@ -128,7 +128,13 @@ export async function sendTrail(text: string): Promise<boolean> {
   }
 }
 
+// 실제 요청마다 부른다. 한도와 폭주를 여기서 막아야 재시도까지 빠짐없이 센다.
+// 논리 호출 단위로 세면 도착 조회의 예비 이름 재시도(최대 3번)가 1번으로 보인다.
+let beforeRequest: (path: string) => void = () => {}
+export const setRequestGuard = (fn: (path: string) => void): void => { beforeRequest = fn }
+
 const get = async (path: string): Promise<unknown> => {
+  beforeRequest(path)
   const res = await fetch(`${BASE}${path}`, { headers: { 'x-metro-token': TOKEN } })
   if (res.status === 403) throw new Error('앱 설정이 서버와 맞지 않습니다')
   if (!res.ok) throw new Error(`서버 ${res.status}`)

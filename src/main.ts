@@ -16,7 +16,7 @@ import {
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
 import { plan, planHop, departures, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
 import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
-import { arrivals, positions, remoteLog, sendTrail, ApiError, type Arrival } from './api.ts'
+import { arrivals, positions, remoteLog, sendTrail, setRequestGuard, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 
@@ -77,6 +77,7 @@ let pageIsText = false
 // 반환값을 확인한다. tiro는 이것을 빼먹어 화면이 멈췄다.
 async function show(content: string): Promise<void> {
   if (pageIsText) {
+    // 매초 도는 길이다. 여기서 log를 부르면 1초마다 한 줄이 쌓이고 워커로도 날아간다.
     const up = await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'main', content }))
     if (up) return
     log('upgrade false, rebuild', S.bytes(content))
@@ -94,6 +95,7 @@ async function showList(items: string[]): Promise<boolean> {
   const fitted = S.fitsAll(items) ? items : S.fitItems(items)
   const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(listOf(fitted)))
   pageIsText = false
+  current = null
   log('list', ok, 'count', fitted.length, 'bytes', S.bytes(fitted.join('')))
   return !!ok
 }
@@ -128,26 +130,27 @@ let recentCalls: number[] = []
 
 class QuotaError extends Error {}
 
-// 호출을 세고, 한도와 폭주를 막는다. 호출하기 전에 막아야 뜻이 있다.
+// 실제 요청마다 부른다(api.ts의 get 안에서). 한도와 폭주를 요청 전에 막는다.
 // 28,165건까지 올라간 적이 있다. 한도를 넘어도 계속 부르고 있었다.
-function guard(): void {
+// 누가 몇 초 만에 불렀는지 남긴다. 폭주가 나면 이 줄이 원인을 가리킨다.
+let lastReqAt = 0
+function guard(path: string): void {
   if (usedDay !== today()) { usedDay = today(); used = 0; recentCalls = [] }
   const now = Date.now()
   recentCalls = recentCalls.filter(t => now - t < 60_000)
+  const dt = lastReqAt ? ((now - lastReqAt) / 1000).toFixed(1) : '-'
   if (recentCalls.length >= BURST_PER_MIN) {
-    log('burst guard', recentCalls.length, '/min')
+    log('burst guard', recentCalls.length, '/min', 'path', path, 'mode', mode)
     throw new QuotaError(`1분에 ${recentCalls.length}번 조회했습니다`)
   }
   if (used >= QUOTA_DAY) throw new QuotaError(`오늘 조회 한도(${QUOTA_DAY}건)를 다 썼습니다`)
   recentCalls.push(now)
+  lastReqAt = now
   used += 1
+  log('req', path, 'dt', dt + 's', 'mode', mode, 'n', used)
   void bridge.setLocalStorage('quota', `${usedDay}:${used}`)
 }
-
-function counted<T>(call: () => Promise<T>): Promise<T> {
-  guard()
-  return call()
-}
+setRequestGuard(guard)
 
 const saveDests = () => bridge.setLocalStorage('destinations', dests.join('\n'))
 
@@ -330,33 +333,38 @@ let stops: string[] = []
 let train: Arrival | null = null
 let boardedAt = 0            // 열차를 고른 시각. 도착 예정 시간을 깎는 데 쓴다.
 let approach = ''            // 아직 승강장에 오지 않은 열차의 현재 역
+// '탭: 열차 다시 고르기'가 적힌 화면에서만 탭이 다시 고르기다.
+// 안내 없는 주행 화면에서 탭마다 도착 조회를 하면 답답해서 누를수록 한도가 샌다.
+let repickable = false
 let atStatus = -1            // 마지막 관측의 trainSttus. 0 진입, 1 도착, 2 출발
-// 갱신 초읽기와 스피너. 매초 화면을 다시 써서 살아 있음을 보여준다.
+// 초 단위 시계와 갱신 막대. 텍스트 화면이 떠 있는 동안 매초 다시 쓴다.
+// 초를 보여주면서 안 움직이면 멈춘 것처럼 보인다. 보여주려면 움직여야 한다.
 // TICK_MS는 실측 전 값이다. 안경 배터리가 빨리 닳거나 쓰기가 거부되면 2000으로 올린다.
 const TICK_MS = 1000
-let nextPollAt = 0           // 다음 폴링 예정 시각. 초읽기의 기준이다.
-let tick = 0                 // 스피너 회전용
+let nextPollAt = 0           // 다음 폴링 예정 시각. 막대와 초읽기의 기준이다.
+let pollWait = 20_000        // 이번 폴링 간격. 막대가 차는 총 길이다.
 let lastPollFailed = false
-let tickTimer: ReturnType<typeof setInterval> | null = null
 let rendering = false        // 폴링 렌더와 틱 렌더가 겹치지 않게
+// 지금 떠 있는 텍스트 화면을 다시 만드는 함수. 목록 화면이면 null.
+let current: (() => string) | null = null
 
 const refresh = (): S.Refresh => ({
   inSec: Math.max(0, Math.ceil((nextPollAt - Date.now()) / 1000)),
-  tick,
+  totalSec: Math.round(pollWait / 1000),
   failed: lastPollFailed,
 })
 
-function startTicking(gen: number): void {
-  stopTicking()
-  tickTimer = setInterval(() => {
-    if (gen !== pollGen || mode !== 'riding' || rendering || busy) return
-    tick += 1
-    void render()
-  }, TICK_MS)
-}
-function stopTicking(): void {
-  if (tickTimer) clearInterval(tickTimer)
-  tickTimer = null
+// 매초 한 번. 주행 중이면 위치 추정까지 다시 계산하고, 그 밖의 텍스트 화면은 시계만 새로 쓴다.
+setInterval(() => {
+  if (rendering || busy) return
+  if (mode === 'riding') void render()
+  else if (current) void show(current())
+}, TICK_MS)
+
+// 시계가 있는 화면은 이것으로 띄운다. 틱이 같은 함수를 다시 불러 초를 갱신한다.
+async function showLive(build: () => string): Promise<void> {
+  current = build
+  await show(build())
 }
 let fixes: Fix[] = []
 let busy = false
@@ -401,7 +409,6 @@ function stopPolling(): void {
   pollGen += 1
   if (pollTimer) clearTimeout(pollTimer)
   pollTimer = null
-  stopTicking()
 }
 
 // ---------- 출발역 ----------
@@ -436,12 +443,12 @@ async function showOrigin(): Promise<void> {
   trip = null
   train = null
   stopPolling()
-  await show(S.notice(Date.now(), '출발역을 찾는 중', '', '위치를 확인하고 있습니다'))
+  await showLive(() => S.notice(Date.now(), '출발역을 찾는 중', '', '위치를 확인하고 있습니다'))
   const near = await nearbyStations()
   const names = [...near.map(n => n.name), ...recents.filter(r => !near.some(n => n.name === r))]
   if (!names.length) {
     rows = []
-    return show(S.notice(Date.now(), '출발역을 찾지 못했습니다',
+    return showLive(() => S.notice(Date.now(), '출발역을 찾지 못했습니다',
       '위치 권한을 켜거나, 폰에서 자주 가는 곳을 넣으세요', '탭: 다시 시도\n  더블탭: 종료'))
   }
   const meters = new Map(near.map(n => [n.name, n.meters]))
@@ -465,7 +472,7 @@ async function showOrigin(): Promise<void> {
   }
   if (!(await showList(items))) {
     rows = []
-    await show(S.notice(Date.now(), '목록을 표시하지 못했습니다', '', '탭: 다시 시도\n  더블탭: 종료'))
+    await showLive(() => S.notice(Date.now(), '목록을 표시하지 못했습니다', '', '탭: 다시 시도\n  더블탭: 종료'))
   }
 }
 
@@ -476,7 +483,7 @@ async function showDest(): Promise<void> {
   const shown = dests.filter(d => d !== origin)
   if (!shown.length) {
     rows = []
-    return show(S.notice(Date.now(), '갈 곳이 없습니다', '폰 화면에서 자주 가는 곳을 넣으세요', '탭: 출발역 다시 고르기'))
+    return showLive(() => S.notice(Date.now(), '갈 곳이 없습니다', '폰 화면에서 자주 가는 곳을 넣으세요', '탭: 출발역 다시 고르기'))
   }
   rows = shown
   // 경로가 없는 곳도 숨기지 않는다. 사용자가 일부러 넣은 것이고,
@@ -489,7 +496,7 @@ async function showDest(): Promise<void> {
   })
   if (!(await showList(items))) {
     rows = []
-    await show(S.notice(Date.now(), '목록을 표시하지 못했습니다', '', '탭: 출발역 다시 고르기'))
+    await showLive(() => S.notice(Date.now(), '목록을 표시하지 못했습니다', '', '탭: 출발역 다시 고르기'))
   }
 }
 
@@ -535,7 +542,7 @@ async function chooseRoute(dest: string): Promise<void> {
     mode = 'dest'
     rows = []
     // 실시간 미지원 노선(인천·김포·용인·의정부)의 역은 그래프에 없어서 여기로 온다
-    return show(S.notice(Date.now(), '경로를 찾지 못했습니다', `${origin} → ${dest}`, '탭: 도착지 다시 고르기'))
+    return showLive(() => S.notice(Date.now(), '경로를 찾지 못했습니다', `${origin} → ${dest}`, '탭: 도착지 다시 고르기'))
   }
   if (options.length === 1) return startTrip(options[0])
 
@@ -553,7 +560,7 @@ async function chooseRoute(dest: string): Promise<void> {
   log('options', items.join(' / '))
   if (!(await showList(items))) {
     rows = []
-    await show(S.notice(Date.now(), '노선 목록을 표시하지 못했습니다', '', '탭: 도착지 다시 고르기'))
+    await showLive(() => S.notice(Date.now(), '노선 목록을 표시하지 못했습니다', '', '탭: 도착지 다시 고르기'))
   }
 }
 
@@ -566,9 +573,10 @@ async function startTrip(picked: Plan): Promise<void> {
   const flat = [...prefs].slice(-40).map(([k, v]) => `${k}\t${v}`).join('\n')
   void bridge.setLocalStorage('prefs', flat)
   log('plan', origin, '->', dest, trip.legs.map(l => `${l.line}[${l.stops.slice(0, 3).join('·')}…${l.stops[l.stops.length - 1]}]`).join(' ▶ '))
-  await show(S.route({
-    now: Date.now(), from: trip.from, to: trip.to, legs: trip.legs,
-    stops: tripStops(trip), minutes: tripMinutes(trip),
+  // 클로저 안에서는 let trip의 null 좁히기가 풀린다. 인자 picked가 같은 값이다.
+  await showLive(() => S.route({
+    now: Date.now(), from: picked.from, to: picked.to, legs: picked.legs,
+    stops: tripStops(picked), minutes: tripMinutes(picked),
     quota: used >= QUOTA_WARN ? `오늘 조회 ${used}/${QUOTA_DAY}` : undefined,
   }))
   await startLeg(0)
@@ -590,16 +598,16 @@ async function showPick(autoBoard = true): Promise<void> {
   mode = 'pick'
   const from = stops[0]
   // 조회에 시간이 걸린다. 탭이 먹혔다는 것을 먼저 보여준다.
-  await show(S.notice(Date.now(), `${from}`, `${leg().line} 도착 열차를 확인합니다`, '잠시만 기다리세요'))
+  await showLive(() => S.notice(Date.now(), `${from}`, `${leg().line} 도착 열차를 확인합니다`, '잠시만 기다리세요'))
   let all: Arrival[]
   try {
-    all = await counted(() => arrivals(from))
+    all = await arrivals(from)
   } catch (e) {
     log('arrivals failed', e)
     rows = []
-    if (e instanceof QuotaError) return show(S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · KST 자정에 초기화`, '탭: 다시 확인'))
-    if (e instanceof ApiError) return show(S.notice(Date.now(), e.message, 'KST 자정에 초기화됩니다', '탭: 다시 확인'))
-    return show(S.notice(Date.now(), '도착 정보를 받지 못했습니다', String(e), '탭: 다시 확인'))
+    if (e instanceof QuotaError) return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · KST 자정에 초기화`, '탭: 다시 확인'))
+    if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, 'KST 자정에 초기화됩니다', '탭: 다시 확인'))
+    return showLive(() => S.notice(Date.now(), '도착 정보를 받지 못했습니다', String(e), '탭: 다시 확인'))
   }
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
   // 방향은 "…방면" 역이 다음 역과 같은지로 가른다.
@@ -614,7 +622,7 @@ async function showPick(autoBoard = true): Promise<void> {
 
   if (!candidates.length) {
     rows = []
-    return show(S.notice(Date.now(), `${from}에 오는 열차가 없습니다`, `${toward()} 방면 도착 정보가 비어 있습니다`, '탭: 다시 확인\n  더블탭: 처음으로'))
+    return showLive(() => S.notice(Date.now(), `${from}에 오는 열차가 없습니다`, `${toward()} 방면 도착 정보가 비어 있습니다`, '탭: 다시 확인\n  더블탭: 처음으로'))
   }
   // 후보가 하나뿐이어도 "다시 고르기"로 온 경우에는 목록을 보여준다.
   // 자동으로 같은 열차를 다시 태우면 탭이 먹히지 않은 것처럼 보인다.
@@ -632,7 +640,7 @@ async function showPick(autoBoard = true): Promise<void> {
   )
   if (!(await showList(items))) {
     rows = []
-    await show(S.notice(Date.now(), '열차 목록을 표시하지 못했습니다', '', '탭: 다시 확인'))
+    await showLive(() => S.notice(Date.now(), '열차 목록을 표시하지 못했습니다', '', '탭: 다시 확인'))
   }
 }
 
@@ -645,7 +653,6 @@ async function board(a: Arrival): Promise<void> {
   fixes = []
   atStatus = -1
   lastPollFailed = false
-  tick = 0
   mode = 'riding'
   log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
   await show(S.waiting({
@@ -655,7 +662,6 @@ async function board(a: Arrival): Promise<void> {
   stopPolling()
   misses = 0
   nextPollAt = Date.now()
-  startTicking(pollGen)
   await poll(pollGen)
 }
 
@@ -665,7 +671,7 @@ async function poll(gen: number): Promise<void> {
   if (gen !== pollGen || mode !== 'riding') return
   if (!busy) {
     try {
-      const me = (await counted(() => positions(leg().line))).find(t => t.trainNo === train!.trainNo)
+      const me = (await positions(leg().line)).find(t => t.trainNo === train!.trainNo)
       if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
       lastPollFailed = false
       if (!me) {
@@ -690,22 +696,22 @@ async function poll(gen: number): Promise<void> {
         stopPolling()
         mode = 'arrived'
         rows = []
-        return show(S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY}`, '탭: 처음으로\n  더블탭: 종료'))
+        return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY}`, '탭: 처음으로\n  더블탭: 종료'))
       }
       if (e instanceof ApiError) {
         // 한도 소진 같은 것은 기다려도 낫지 않는다. 숨기지 않고 말한다.
         stopPolling()
         mode = 'arrived'
         rows = []
-        return show(S.notice(Date.now(), e.message, '자정에 초기화됩니다', '탭: 처음으로\n  더블탭: 종료'))
+        return showLive(() => S.notice(Date.now(), e.message, '자정에 초기화됩니다', '탭: 처음으로\n  더블탭: 종료'))
       }
     }
     await render()
   }
   if (gen === pollGen && mode === 'riding') {
-    const wait = pollDelay()
-    nextPollAt = Date.now() + wait
-    pollTimer = setTimeout(() => poll(gen), wait)
+    pollWait = pollDelay()
+    nextPollAt = Date.now() + pollWait
+    pollTimer = setTimeout(() => poll(gen), pollWait)
   }
 }
 
@@ -719,8 +725,10 @@ async function renderNow(): Promise<void> {
   const now = Date.now()
   const guess = locate(stops, fixes, now)
 
+  repickable = !guess || false   // 아래에서 화면 종류에 따라 다시 정한다
   if (!guess) {
     // 아직 타지 않았다. 열차가 오는 중이거나, 열차를 못 찾았다.
+    repickable = true
     const etaSec = Math.max(0, train!.etaSec - Math.round((now - boardedAt) / 1000))
     // 세 번 연속(30초) 못 찾기 전에는 오류로 단정하지 않는다.
     // 한 번 놓친 것은 흔하다. 그때마다 오류를 띄우면 화면이 깜빡인다.
@@ -731,7 +739,7 @@ async function renderNow(): Promise<void> {
         refresh: refresh(),
       }))
     }
-    return show(S.notice(now, `${train!.trainNo}번 열차를 찾지 못했습니다`, `${leg().line} 실시간 정보에 ${misses}회 연속 없습니다`, '탭: 열차 다시 고르기\n  더블탭: 처음으로'))
+    return showLive(() => S.notice(Date.now(), `${train!.trainNo}번 열차를 찾지 못했습니다`, `${leg().line} 실시간 정보에 ${misses}회 연속 없습니다`, '탭: 열차 다시 고르기\n  더블탭: 처음으로'))
   }
 
   const left = stopsLeft(stops, stops[guess.index])
@@ -742,6 +750,7 @@ async function renderNow(): Promise<void> {
   const dest = stops[stops.length - 1]
 
   if (guess.stale) {
+    repickable = true
     return show(S.lost({
       now, last: lastFix.station,
       agoSec: Math.round((now - lastFix.at) / 1000),
@@ -787,7 +796,7 @@ async function arrive(): Promise<void> {
   const nextLeg = trip!.legs[legIndex + 1]
   if (nextLeg) {
     mode = 'transfer'
-    return show(S.transfer({
+    return showLive(() => S.transfer({
       now: Date.now(),
       station: stops[stops.length - 1],
       from: leg().line, to: nextLeg.line,
@@ -798,7 +807,7 @@ async function arrive(): Promise<void> {
     }))
   }
   mode = 'arrived'
-  await show(S.arrived(Date.now(), stops[stops.length - 1]))
+  await showLive(() => S.arrived(Date.now(), stops[stops.length - 1]))
 }
 
 // ---------- 이벤트 ----------
@@ -829,8 +838,12 @@ async function onTap(index: number): Promise<void> {
     const a = picks.find(p => p.trainNo === rows[index])
     return a ? board(a) : showPick()          // 실패 화면에서 탭하면 다시 확인
   }
-  // 엉뚱한 열차를 잡았을 때. 자동 탑승을 끄고 목록을 보여준다.
-  if (mode === 'riding') { stopPolling(); return showPick(false) }
+  // 안내가 적힌 화면(열차 대기, 신호 끊김, 못 찾음)에서만. 주행 화면 탭은 아무것도 하지 않는다.
+  if (mode === 'riding') {
+    if (!repickable) return
+    stopPolling()
+    return showPick(false)
+  }
   if (mode === 'transfer') return startLeg(legIndex + 1)
   return showOrigin()                                            // arrived
 }
@@ -857,7 +870,7 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
     stopPolling()
     mode = 'origin'
     rows = []
-    await show(S.notice(Date.now(), '오류', String(e), '탭: 처음으로\n  더블탭: 종료'))
+    await showLive(() => S.notice(Date.now(), '오류', String(e), '탭: 처음으로\n  더블탭: 종료'))
   } finally {
     busy = false
   }
