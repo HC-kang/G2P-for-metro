@@ -1,3 +1,12 @@
+// 초기화가 도중에 터지면 화면이 반쯤만 살아난다. 그것을 사람이 알아채기 어렵다.
+// 아래 어떤 선언에도 기대지 않는 안전망을 맨 먼저 단다. 오류가 나면 폰 화면 맨 위에 적힌다.
+const fatal = (what: string) => {
+  const el = document.getElementById('fatal')
+  if (el) el.textContent = `앱이 제대로 시작되지 않았습니다: ${what}`
+}
+window.addEventListener('error', e => fatal(e.message))
+window.addEventListener('unhandledrejection', e => fatal(String((e as PromiseRejectionEvent).reason)))
+
 import {
   waitForEvenAppBridge,
   TextContainerProperty, ListContainerProperty, ListItemContainerProperty,
@@ -92,6 +101,42 @@ let recents = parseLines((await bridge.getLocalStorage('recentOrigins')) ?? '', 
 const savedQuota = ((await bridge.getLocalStorage('quota')) ?? '').split(':')
 const prefs = new Map(((await bridge.getLocalStorage('prefs')) ?? '').split('\n')
   .map(l => l.split('\t')).filter(v => v.length === 2) as [string, string][])
+
+// 서울 API 하루 한도. 넘으면 ERROR-337이 오고 아무것도 못 본다.
+// 조용히 넘기지 않으려고 직접 센다. 날짜가 바뀌면 0으로 돌아간다.
+const QUOTA_DAY = 1000
+const QUOTA_WARN = 800
+// 서울 API는 KST 자정에 초기화된다. UTC 날짜를 쓰면 오전 9시에 엉뚱하게 초기화된다.
+const today = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)
+// 1분에 이만큼 넘게 부르면 무언가 폭주한 것이다. 정상은 분당 2~4건이다.
+const BURST_PER_MIN = 10
+
+let usedDay = savedQuota[0] === today() ? savedQuota[0] : today()
+let used = savedQuota[0] === today() ? Number(savedQuota[1]) || 0 : 0
+let recentCalls: number[] = []
+
+class QuotaError extends Error {}
+
+// 호출을 세고, 한도와 폭주를 막는다. 호출하기 전에 막아야 뜻이 있다.
+// 28,165건까지 올라간 적이 있다. 한도를 넘어도 계속 부르고 있었다.
+function guard(): void {
+  if (usedDay !== today()) { usedDay = today(); used = 0; recentCalls = [] }
+  const now = Date.now()
+  recentCalls = recentCalls.filter(t => now - t < 60_000)
+  if (recentCalls.length >= BURST_PER_MIN) {
+    log('burst guard', recentCalls.length, '/min')
+    throw new QuotaError(`1분에 ${recentCalls.length}번 조회했습니다`)
+  }
+  if (used >= QUOTA_DAY) throw new QuotaError(`오늘 조회 한도(${QUOTA_DAY}건)를 다 썼습니다`)
+  recentCalls.push(now)
+  used += 1
+  void bridge.setLocalStorage('quota', `${usedDay}:${used}`)
+}
+
+function counted<T>(call: () => Promise<T>): Promise<T> {
+  guard()
+  return call()
+}
 
 const saveDests = () => bridge.setLocalStorage('destinations', dests.join('\n'))
 
@@ -294,41 +339,6 @@ const restMinutes = (from: number, pace = DEFAULT_PACE_MS) =>
   Math.round((trip!.legs.slice(from).reduce((n, l) => n + l.stops.length - 1, 0) * pace) / 60_000
     + (trip!.legs.length - 1 - from) * TRANSFER_MIN)
 
-// 서울 API 하루 한도. 넘으면 ERROR-337이 오고 아무것도 못 본다.
-// 조용히 넘기지 않으려고 직접 센다. 날짜가 바뀌면 0으로 돌아간다.
-const QUOTA_DAY = 1000
-const QUOTA_WARN = 800
-// 서울 API는 KST 자정에 초기화된다. UTC 날짜를 쓰면 오전 9시에 엉뚱하게 초기화된다.
-const today = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)
-// 1분에 이만큼 넘게 부르면 무언가 폭주한 것이다. 정상은 분당 2~4건이다.
-const BURST_PER_MIN = 10
-
-let usedDay = savedQuota[0] === today() ? savedQuota[0] : today()
-let used = savedQuota[0] === today() ? Number(savedQuota[1]) || 0 : 0
-let recentCalls: number[] = []
-
-class QuotaError extends Error {}
-
-// 호출을 세고, 한도와 폭주를 막는다. 호출하기 전에 막아야 뜻이 있다.
-// 28,165건까지 올라간 적이 있다. 한도를 넘어도 계속 부르고 있었다.
-function guard(): void {
-  if (usedDay !== today()) { usedDay = today(); used = 0; recentCalls = [] }
-  const now = Date.now()
-  recentCalls = recentCalls.filter(t => now - t < 60_000)
-  if (recentCalls.length >= BURST_PER_MIN) {
-    log('burst guard', recentCalls.length, '/min')
-    throw new QuotaError(`1분에 ${recentCalls.length}번 조회했습니다`)
-  }
-  if (used >= QUOTA_DAY) throw new QuotaError(`오늘 조회 한도(${QUOTA_DAY}건)를 다 썼습니다`)
-  recentCalls.push(now)
-  used += 1
-  void bridge.setLocalStorage('quota', `${usedDay}:${used}`)
-}
-
-function counted<T>(call: () => Promise<T>): Promise<T> {
-  guard()
-  return call()
-}
 
 const GPS_TIMEOUT_MS = 5000
 // 서울 API는 하루 1000건이 한도다(ERROR-337). 10초 폴링은 시간당 360건이라 두 번 타면 바닥난다.
