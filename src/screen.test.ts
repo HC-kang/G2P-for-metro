@@ -4,6 +4,7 @@ import * as S from './screen.ts'
 
 // 2026-09-20 18:42 KST 고정. 시각이 들어가는 화면을 결정적으로 만든다.
 const T = new Date('2026-09-20T18:42:00+09:00').getTime()
+const R = { inSec: 12, tick: 0, failed: false }
 
 const ok = (s: string, what: string) => {
   assert.ok(S.bytes(s) <= S.PAGE_BYTES, `${what}: ${S.bytes(s)}바이트\n${s}`)
@@ -12,14 +13,14 @@ const ok = (s: string, what: string) => {
 }
 
 const riding = (over: Partial<Parameters<typeof S.riding>[0]> = {}) => S.riding({
-  now: T, line: '2호선', at: { station: '삼성', label: '출발', agoSec: 8 },
+  now: T, line: '2호선', at: { station: '삼성', label: '출발' }, refresh: R,
   next: '역삼', legDest: '교대',
   stopsLeft: 4, paceMs: 120_000, pathLen: 7, index: 3, estimated: 0, ...over,
 })
 
-const waiting = () => S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산', from: '노원', etaSec: 180, agoSec: 12 })
+const waiting = () => S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산', from: '노원', etaSec: 180, refresh: R })
 const transfer = () => S.transfer({ now: T, station: '교대', from: '2호선', to: '3호선', toward: '경복궁', rest: 3, minutes: 10 })
-const lost = () => S.lost({ now: T, last: '선릉', agoSec: 52, guess: '역삼', dest: '강남', stopsLeft: 3, bar: S.track(6, 3, 2) })
+const lost = () => S.lost({ now: T, last: '선릉', agoSec: 52, guess: '역삼', dest: '강남', stopsLeft: 3, bar: S.track(6, 3, 2), refresh: R })
 const alight = (n: number) => S.alight({ now: T, stopsLeft: n, dest: '하계', next: '중계', minutes: n * 2 })
 
 test('bytes와 cols', () => {
@@ -31,6 +32,8 @@ test('bytes와 cols', () => {
 
 test('hhmm은 시각을 두 자리로 준다', () => {
   assert.equal(S.hhmm(T), '18:42')
+  assert.equal(S.hhmmss(T), '18:42:00')
+  assert.equal(S.hhmmss(T + 7_000), '18:42:07')
   assert.equal(S.hhmm(new Date('2026-09-20T09:05:00+09:00').getTime()), '09:05')
 })
 
@@ -43,11 +46,18 @@ test('ago는 데이터가 얼마나 묵었는지 말한다', () => {
   assert.equal(S.ago(-1), '')   // 아직 받은 것이 없으면 시간을 지어내지 않는다
 })
 
-test('주행 화면이 갱신 시각을 보여준다', () => {
-  // 폴링이 도는지 화면만 보고 알 수 있어야 한다
-  assert.ok(riding().includes('8초 전'), riding())
-  assert.ok(waiting().includes('12초 전'), waiting())
-  assert.ok(riding({ at: { station: '삼성', label: '출발', agoSec: -1 } }).includes('삼성 출발'))
+test('주행 화면이 갱신 초읽기와 스피너를 보여준다', () => {
+  // 폴링이 도는지, 곧 바뀌는지 화면만 보고 알 수 있어야 한다
+  assert.ok(riding().includes('12초 뒤 갱신'), riding())
+  assert.ok(waiting().includes('12초 뒤 갱신'), waiting())
+  assert.ok(/[◐◓◑◒]/.test(riding()), '스피너 글리프가 있어야 합니다')
+  // 틱마다 글리프가 돈다. 5초 이하면 두 칸씩 돌아 빨라진다
+  const g = (tick: number, inSec: number) => S.refreshLine({ inSec, tick, failed: false })[0]
+  assert.notEqual(g(0, 12), g(1, 12))
+  assert.equal(g(0, 12), g(4, 12))              // 4틱에 한 바퀴
+  assert.equal(g(0, 3), g(2, 3))                // 5초 이하: 2틱에 한 바퀴
+  assert.ok(S.refreshLine({ inSec: 7, tick: 0, failed: true }).includes('갱신 실패 · 7초 뒤 재시도'))
+  assert.ok(riding({ refresh: { inSec: 0, tick: 0, failed: false } }).includes('갱신 중'))
 })
 
 test('statusWord는 전광판과 같은 말을 쓴다', () => {
@@ -91,7 +101,7 @@ test('riding은 지금 어디인지와 다음 역을 함께 보여준다', () =>
 })
 
 test('riding은 추정 구간임을 밝힌다', () => {
-  const s = riding({ at: { station: '삼성', label: '부근 (추정)', agoSec: 190 }, estimated: 2 })
+  const s = riding({ at: { station: '삼성', label: '부근 (추정)' }, estimated: 2 })
   assert.ok(s.includes('삼성 부근 (추정)'), s)
   assert.ok(s.includes('◌'), '추정 구간은 진행 띠에도 나타나야 합니다')
   ok(s, 'riding 추정')
@@ -128,7 +138,7 @@ test('waiting은 열차의 실제 위치와 도착 예정을 보여준다', () =
   assert.ok(s.replace(/ /g, '').includes('수락산'), s)
   assert.ok(s.includes('18:45 도착') && s.includes('약 3분'), s)
   // 도착 예정이 없으면 시간을 지어내지 않는다
-  const zero = S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산', from: '노원', etaSec: 0, agoSec: 12 })
+  const zero = S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산', from: '노원', etaSec: 0, refresh: R })
   assert.ok(!zero.includes('도착 ·') && zero.includes('노원 도착을 기다립니다'), zero)
   ok(s, 'waiting')
 })
@@ -143,7 +153,7 @@ test('모든 화면이 현재시각을 밝히고 한도를 지킨다', () => {
     ['notice', S.notice(T, '머리말', '본문입니다', '탭: 처음으로\n더블탭: 종료')],
   ]
   for (const [name, s] of screens) {
-    assert.ok(s.split('\n')[0].includes('현재시각 18:42'), `${name}: 첫 줄에 현재시각이 없습니다\n${s}`)
+    assert.ok(s.split('\n')[0].includes('현재시각 18:42:00'), `${name}: 첫 줄에 초 단위 현재시각이 없습니다\n${s}`)
     ok(s, name)
   }
   // 도착 예정 시각에는 '현재시각'이 붙지 않아야 한다
@@ -169,7 +179,7 @@ test('실제 경로로 만든 화면이 모두 한도를 지킨다', async () =>
     const leg = p.legs[0]
     const legDest = leg.stops[leg.stops.length - 1]
     ok(riding({
-      line: leg.line, at: { station: leg.stops[0], label: '출발', agoSec: 8 }, next: leg.stops[1], legDest,
+      line: leg.line, at: { station: leg.stops[0], label: '출발' }, next: leg.stops[1], legDest,
       stopsLeft: leg.stops.length - 1, pathLen: leg.stops.length, index: 0,
       transfer: p.legs[1] ? { line: p.legs[1].line, finalDest: p.to, finalMinutes: stops * 2 } : undefined,
     }), `riding ${a}→${b}`)

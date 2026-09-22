@@ -47,6 +47,20 @@ export const hhmm = (ms: number): string => {
   const d = new Date(ms)
   return `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}`
 }
+export const hhmmss = (ms: number): string =>
+  `${hhmm(ms)}:${String(new Date(ms).getSeconds()).padStart(2, '0')}`
+
+// 갱신을 기다리는 동안 화면이 살아 있음을 보여준다. 틱마다 한 칸 돈다.
+// 남은 시간이 5초 이하면 두 칸씩 돌아 빨라진다. 곧 바뀐다는 뜻이다.
+const SPIN = ['◐', '◓', '◑', '◒']
+export type Refresh = { inSec: number; tick: number; failed: boolean }
+export function refreshLine(r: Refresh): string {
+  const step = r.inSec <= 5 ? 2 : 1
+  const glyph = SPIN[(r.tick * step) % SPIN.length]
+  const sec = Math.max(0, r.inSec)
+  if (r.failed) return `${glyph} 갱신 실패 · ${sec}초 뒤 재시도`
+  return sec === 0 ? `${glyph} 갱신 중` : `${glyph} ${sec}초 뒤 갱신`
+}
 
 // 자간을 벌려 강조한다. 크기를 못 바꾸므로 이것이 유일한 강조 수단이다.
 const wide = (s: string) => [...s].join(' ')
@@ -89,7 +103,7 @@ const screen = (...lines: (string | null)[]) => lines.filter(l => l !== null).jo
 
 // 모든 화면의 첫 줄. 화면에는 도착 예정 시각도 나오므로 현재 시각임을 '지금'으로 밝힌다.
 // 오른쪽 정렬은 폭을 알아야 하므로 쓰지 않는다.
-const head = (now: number, context = '') => `${PAD}현재시각 ${hhmm(now)}${context ? `  ${context}` : ''}`
+const head = (now: number, context = '') => `${PAD}현재시각 ${hhmmss(now)}${context ? `  ${context}` : ''}`
 
 // 머리줄이 넘치면 행선지를 버리고 노선만 남긴다.
 // '동대문역사문화공원행'은 그것만으로 20칸이다.
@@ -110,7 +124,8 @@ export const statusWord = (status: number): string =>
 // 노선 방면은 머리줄로 물러선다. 이미 탄 뒤에는 어디쯤인지가 더 급하다.
 export function riding(a: {
   now: number; line: string
-  at: { station: string; label: string; agoSec: number }
+  at: { station: string; label: string }
+  refresh: Refresh
   next: string; legDest: string; stopsLeft: number; paceMs: number
   pathLen: number; index: number; estimated: number
   transfer?: { line: string; finalDest: string; finalMinutes: number }
@@ -119,7 +134,7 @@ export function riding(a: {
   return screen(
     head(a.now, a.line),
     '',
-    ...pair(a.at.station, `${a.at.label}  ${ago(a.at.agoSec)}`),
+    ...pair(`${a.at.station} ${a.at.label}`, refreshLine(a.refresh)),
     '',
     `${PAD}다음   ${hero(a.next, 9)}`,
     '',
@@ -161,14 +176,14 @@ export function transfer(a: { now: number; station: string; from: string; to: st
 }
 
 // 고른 열차가 아직 승강장에 오지 않았다. 기다리는 동안 실제 위치를 보여준다.
-export function waiting(a: { now: number; line: string; toward: string; at: string; from: string; etaSec: number; agoSec: number }): string {
+export function waiting(a: { now: number; line: string; toward: string; at: string; from: string; etaSec: number; refresh: Refresh }): string {
   const eta = a.etaSec > 0
     ? `${hhmm(a.now + a.etaSec * 1000)} 도착 · 약 ${Math.max(1, Math.round(a.etaSec / 60))}분`
     : `${a.from} 도착을 기다립니다`
   return screen(
     head(a.now, context(a.now, a.line, a.toward)), '',
     `${PAD}열차가 오는 중`, '',
-    ...pair(a.at, ago(a.agoSec)),
+    ...pair(`현재 ${a.at}`, refreshLine(a.refresh)),
     `${PAD}${eta}`, '',
     `${PAD}탭: 열차 다시 고르기`,
     `${PAD}더블탭: 처음으로`,
@@ -176,10 +191,11 @@ export function waiting(a: { now: number; line: string; toward: string; at: stri
 }
 
 // 관측이 끊겼다. 추정임을 화면이 스스로 말한다.
-export function lost(a: { now: number; last: string; agoSec: number; guess: string; dest: string; stopsLeft: number; bar: string }): string {
+export function lost(a: { now: number; last: string; agoSec: number; guess: string; dest: string; stopsLeft: number; bar: string; refresh: Refresh }): string {
   return screen(
     head(a.now, '신호 끊김'),
-    `${PAD}마지막 관측  ${a.last}  ${ago(a.agoSec)}`, '',
+    `${PAD}마지막 관측  ${a.last}  ${ago(a.agoSec)}`,
+    `${PAD}${refreshLine(a.refresh)}`, '',
     `${PAD}추정   ${hero(a.guess, 12)} 부근`, '',
     `${PAD}${a.bar}`,
     ...pair(a.dest, `${a.stopsLeft}정거장 남음`), '',

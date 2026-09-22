@@ -10,7 +10,7 @@ window.addEventListener('unhandledrejection', e => fatal(String((e as PromiseRej
 import {
   waitForEvenAppBridge,
   TextContainerProperty, ListContainerProperty, ListItemContainerProperty,
-  CreateStartUpPageContainer, RebuildPageContainer, OsEventTypeList,
+  CreateStartUpPageContainer, RebuildPageContainer, TextContainerUpgrade, OsEventTypeList,
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
@@ -70,9 +70,19 @@ const listOf = (items: string[]) => ({
   })],
 })
 
+// 지금 안경에 떠 있는 것이 텍스트 페이지인지. 맞으면 내용만 갈아끼운다(가벼움).
+// 목록 페이지에서 텍스트로 바뀔 때만 페이지를 다시 만든다.
+let pageIsText = false
+
 // 반환값을 확인한다. tiro는 이것을 빼먹어 화면이 멈췄다.
 async function show(content: string): Promise<void> {
+  if (pageIsText) {
+    const up = await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'main', content }))
+    if (up) return
+    log('upgrade false, rebuild', S.bytes(content))
+  }
   const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(full(content)))
+  pageIsText = !!ok
   log('show', ok, 'bytes', S.bytes(content))
   if (!ok) {
     await bridge.rebuildPageContainer(new RebuildPageContainer(
@@ -83,6 +93,7 @@ async function show(content: string): Promise<void> {
 async function showList(items: string[]): Promise<boolean> {
   const fitted = S.fitsAll(items) ? items : S.fitItems(items)
   const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(listOf(fitted)))
+  pageIsText = false
   log('list', ok, 'count', fitted.length, 'bytes', S.bytes(fitted.join('')))
   return !!ok
 }
@@ -320,7 +331,33 @@ let train: Arrival | null = null
 let boardedAt = 0            // 열차를 고른 시각. 도착 예정 시간을 깎는 데 쓴다.
 let approach = ''            // 아직 승강장에 오지 않은 열차의 현재 역
 let atStatus = -1            // 마지막 관측의 trainSttus. 0 진입, 1 도착, 2 출발
-let seenAt = 0               // 마지막 관측의 보고 시각. 데이터가 얼마나 묵었는지 보여준다.
+// 갱신 초읽기와 스피너. 매초 화면을 다시 써서 살아 있음을 보여준다.
+// TICK_MS는 실측 전 값이다. 안경 배터리가 빨리 닳거나 쓰기가 거부되면 2000으로 올린다.
+const TICK_MS = 1000
+let nextPollAt = 0           // 다음 폴링 예정 시각. 초읽기의 기준이다.
+let tick = 0                 // 스피너 회전용
+let lastPollFailed = false
+let tickTimer: ReturnType<typeof setInterval> | null = null
+let rendering = false        // 폴링 렌더와 틱 렌더가 겹치지 않게
+
+const refresh = (): S.Refresh => ({
+  inSec: Math.max(0, Math.ceil((nextPollAt - Date.now()) / 1000)),
+  tick,
+  failed: lastPollFailed,
+})
+
+function startTicking(gen: number): void {
+  stopTicking()
+  tickTimer = setInterval(() => {
+    if (gen !== pollGen || mode !== 'riding' || rendering || busy) return
+    tick += 1
+    void render()
+  }, TICK_MS)
+}
+function stopTicking(): void {
+  if (tickTimer) clearInterval(tickTimer)
+  tickTimer = null
+}
 let fixes: Fix[] = []
 let busy = false
 let pollTimer: ReturnType<typeof setTimeout> | null = null
@@ -364,6 +401,7 @@ function stopPolling(): void {
   pollGen += 1
   if (pollTimer) clearTimeout(pollTimer)
   pollTimer = null
+  stopTicking()
 }
 
 // ---------- 출발역 ----------
@@ -606,15 +644,18 @@ async function board(a: Arrival): Promise<void> {
   approach = ''
   fixes = []
   atStatus = -1
-  seenAt = 0
+  lastPollFailed = false
+  tick = 0
   mode = 'riding'
   log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
   await show(S.waiting({
     now: Date.now(), line: leg().line, toward: a.dest || a.toward,
-    at: '확인 중', from: stops[0], etaSec: a.etaSec, agoSec: -1,
+    at: '확인 중', from: stops[0], etaSec: a.etaSec, refresh: refresh(),
   }))
   stopPolling()
   misses = 0
+  nextPollAt = Date.now()
+  startTicking(pollGen)
   await poll(pollGen)
 }
 
@@ -626,6 +667,7 @@ async function poll(gen: number): Promise<void> {
     try {
       const me = (await counted(() => positions(leg().line))).find(t => t.trainNo === train!.trainNo)
       if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
+      lastPollFailed = false
       if (!me) {
         misses += 1
         log('train not in feed', train!.trainNo, 'misses', misses)
@@ -633,18 +675,17 @@ async function poll(gen: number): Promise<void> {
         misses = 0
         approach = ''
         atStatus = me.status
-        seenAt = me.at
         const last = fixes[fixes.length - 1]
         if (!last || last.station !== me.station) fixes.push({ station: me.station, at: me.at })
       } else {
         // 고른 열차가 아직 승강장에 오지 않았다. 오는 중이다.
         misses = 0
         approach = me.station
-        seenAt = me.at
         log('train approaching', me.station, 'at', new Date(me.at).toTimeString().slice(0, 8))
       }
     } catch (e) {
       log('poll failed', e)   // 일시적 실패는 화면을 바꾸지 않는다. render가 추정으로 처리한다
+      lastPollFailed = true
       if (e instanceof QuotaError) {
         stopPolling()
         mode = 'arrived'
@@ -661,10 +702,20 @@ async function poll(gen: number): Promise<void> {
     }
     await render()
   }
-  if (gen === pollGen && mode === 'riding') pollTimer = setTimeout(() => poll(gen), pollDelay())
+  if (gen === pollGen && mode === 'riding') {
+    const wait = pollDelay()
+    nextPollAt = Date.now() + wait
+    pollTimer = setTimeout(() => poll(gen), wait)
+  }
 }
 
 async function render(): Promise<void> {
+  if (rendering) return
+  rendering = true
+  try { await renderNow() } finally { rendering = false }
+}
+
+async function renderNow(): Promise<void> {
   const now = Date.now()
   const guess = locate(stops, fixes, now)
 
@@ -677,7 +728,7 @@ async function render(): Promise<void> {
       return show(S.waiting({
         now, line: leg().line, toward: train!.dest || train!.toward,
         at: approach || '확인 중', from: stops[0], etaSec,
-        agoSec: seenAt ? Math.round((now - seenAt) / 1000) : -1,
+        refresh: refresh(),
       }))
     }
     return show(S.notice(now, `${train!.trainNo}번 열차를 찾지 못했습니다`, `${leg().line} 실시간 정보에 ${misses}회 연속 없습니다`, '탭: 열차 다시 고르기\n  더블탭: 처음으로'))
@@ -697,6 +748,7 @@ async function render(): Promise<void> {
       guess: stops[guess.index],
       dest, stopsLeft: left,
       bar: S.track(stops.length, guess.index, guess.estimated),
+      refresh: refresh(),
     }))
   }
 
@@ -709,13 +761,12 @@ async function render(): Promise<void> {
 
   const nextLeg = trip!.legs[legIndex + 1]
   // 지금 어디인지. 관측이면 전광판과 같은 말(진입·도착·출발), 추정이면 추정이라고 말한다.
-  const agoSec = seenAt ? Math.round((now - seenAt) / 1000) : -1
   const at = guess.estimated > 0
-    ? { station: stops[guess.index], label: '부근 (추정)', agoSec }
-    : { station: stops[guess.index], label: S.statusWord(atStatus) || '통과', agoSec }
+    ? { station: stops[guess.index], label: '부근 (추정)' }
+    : { station: stops[guess.index], label: S.statusWord(atStatus) || '통과' }
   await show(S.riding({
     now, line: leg().line,
-    at,
+    at, refresh: refresh(),
     next: stops[guess.index + 1],
     legDest: dest, stopsLeft: left, paceMs: pace,
     pathLen: stops.length, index: guess.index, estimated: guess.estimated,
