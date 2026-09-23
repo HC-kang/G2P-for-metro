@@ -20,6 +20,9 @@ export default defineConfig({
     'import.meta.env.VITE_APP_NAME': JSON.stringify(name),
     'import.meta.env.VITE_APP_VERSION': JSON.stringify(version),
   },
-  server: { host: true, port: 5173 },
+  // HMR을 끈다. 편집을 밀어넣을 때마다 안경에 떠 있는 페이지가 통째로 다시 시작됐고,
+  // 13번 재시작 뒤 안경이 화면 재구성을 전부 거부했다(2026-09-23 로그). 
+  // 시험 중인 사람의 세션을 내가 깨면 안 된다. 새 코드는 사용자가 QR을 다시 찍을 때 받는다.
+  server: { host: true, port: 5173, hmr: false },
   build: { target: 'esnext' },
 })

@@ -84,8 +84,13 @@ async function show(content: string): Promise<void> {
   }
   const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(full(content)))
   pageIsText = !!ok
-  log('show', ok, 'bytes', S.bytes(content))
-  if (!ok) {
+  if (ok) { showFails = 0; return }
+  showFails += 1
+  // 실패마다 한 줄씩 남기면 383줄이 쌓인다. 멈추는 순간 한 번만 알린다.
+  if (showFails <= SHOW_FAIL_STOP) log('show false', 'bytes', S.bytes(content), 'fails', showFails)
+  if (showFails === SHOW_FAIL_STOP) log('show 연속 실패, 틱 중단. 탭이나 폴링 성공에 재개')
+  // 실패한 직후 또 재구성하면 한 틱에 두 번 때린다. 대체 화면은 한 번만 시도한다.
+  if (showFails === 1) {
     await bridge.rebuildPageContainer(new RebuildPageContainer(
       full(S.notice(Date.now(), '화면을 표시하지 못했습니다', '', '탭: 처음으로\n  더블탭: 종료'))))
   }
@@ -354,9 +359,14 @@ const refresh = (): S.Refresh => ({
   failed: lastPollFailed,
 })
 
+// 화면 재구성이 연달아 실패하면 매초 때리기를 멈춘다. 383번 연속 실패한 적이 있다.
+// 다시 그릴 이유(탭, 폴링 성공)가 생기면 카운터를 0으로 돌려 재개한다.
+const SHOW_FAIL_STOP = 3
+let showFails = 0
+
 // 매초 한 번. 주행 중이면 위치 추정까지 다시 계산하고, 그 밖의 텍스트 화면은 시계만 새로 쓴다.
-setInterval(() => {
-  if (rendering || busy) return
+const ticker = setInterval(() => {
+  if (rendering || busy || showFails >= SHOW_FAIL_STOP) return
   if (mode === 'riding') void render()
   else if (current) void show(current())
 }, TICK_MS)
@@ -674,6 +684,7 @@ async function poll(gen: number): Promise<void> {
       const me = (await positions(leg().line)).find(t => t.trainNo === train!.trainNo)
       if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
       lastPollFailed = false
+      showFails = 0
       if (!me) {
         misses += 1
         log('train not in feed', train!.trainNo, 'misses', misses)
@@ -690,7 +701,10 @@ async function poll(gen: number): Promise<void> {
         log('train approaching', me.station, 'at', new Date(me.at).toTimeString().slice(0, 8))
       }
     } catch (e) {
-      log('poll failed', e)   // 일시적 실패는 화면을 바꾸지 않는다. render가 추정으로 처리한다
+      // 일시적 실패는 화면을 바꾸지 않는다. render가 추정으로 처리한다.
+      // 'The string did not match the expected pattern'처럼 메시지만으로 출처를 모르는 오류가 있었다.
+      const st = e instanceof Error && e.stack ? ' @ ' + e.stack.split('\n').slice(0, 3).join(' | ') : ''
+      log('poll failed', e instanceof Error ? e.name : typeof e, String(e) + st)
       lastPollFailed = true
       if (e instanceof QuotaError) {
         stopPolling()
@@ -852,10 +866,12 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
   const type = eventTypeOf(event.listEvent) ?? eventTypeOf(event.textEvent) ?? eventTypeOf(event.sysEvent)
   if (type === OsEventTypeList.SYSTEM_EXIT_EVENT || type === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
     stopPolling()
+    clearInterval(ticker)
     return unsubscribe()
   }
   if (type === null || busy) return
   busy = true
+  showFails = 0   // 사람이 만졌다. 화면 재구성을 다시 시도한다
   try {
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
       // 루트 화면의 더블탭은 반드시 종료여야 한다 (Even Hub 요구사항)
@@ -881,6 +897,7 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
 if (import.meta.hot) {
   import.meta.hot.dispose(() => {
     stopPolling()
+    clearInterval(ticker)
     unsubscribe()
   })
 }
