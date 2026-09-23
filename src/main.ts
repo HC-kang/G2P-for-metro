@@ -424,15 +424,65 @@ function stopPolling(): void {
 // ---------- 출발역 ----------
 
 let gpsRough = false   // 오차가 커서 목록 순서를 믿기 어려운 상태
+let gpsStale = false   // 호스트가 준 위치가 오래된 것이라 실제 위치와 다를 수 있는 상태
+
+// getAppLocation은 호스트의 마지막 위치를 그대로 돌려준다.
+// 실측: 한 세션의 GPS 읽기 10번이 소수점 5자리까지 같은 좌표였다. 주행을 했는데도.
+// timestamp로 묵은 것을 가려내고, 묵었으면 갱신을 켜 새 측위를 밀어받는다.
+const GPS_FRESH_MS = 30_000
+const GPS_WAIT_FRESH_MS = 8_000
+
+type Loc = { latitude: number; longitude: number; accuracy?: number; timestamp?: number }
+
+// timestamp 단위는 문서에 없다. 1e12보다 작으면 초로 보고 ms로 바꾼다. 원값은 로그로 남겨 배운다.
+const tsMs = (t?: number): number | null =>
+  t == null || !Number.isFinite(t) ? null : t < 1e12 ? t * 1000 : t
+const ageSec = (l: Loc): number | null => {
+  const t = tsMs(l.timestamp)
+  return t == null ? null : Math.round((Date.now() - t) / 1000)
+}
+
+// 갱신을 켜고, 요청한 시각 이후에 찍힌 좌표가 오면 그것을 쓴다. 안 오면 null.
+function waitFreshFix(since: number): Promise<Loc | null> {
+  return new Promise(resolve => {
+    let done = false
+    const finish = (l: Loc | null) => {
+      if (done) return
+      done = true
+      off()
+      void bridge.stopAppLocationUpdates()
+      resolve(l)
+    }
+    const off = bridge.onAppLocationChanged(l => {
+      const t = tsMs(l.timestamp)
+      log('gps push', l.latitude, l.longitude, 'acc', l.accuracy, 'ts', l.timestamp, 'age', ageSec(l))
+      // timestamp가 없으면 밀어준 것 자체를 새 측위로 본다
+      if (t == null || t >= since) finish(l)
+    })
+    void bridge.startAppLocationUpdates({ accuracy: AppLocationAccuracy.High, intervalMs: 1000 })
+      .then(ok => { if (!ok) finish(null) })
+    setTimeout(() => finish(null), GPS_WAIT_FRESH_MS)
+  })
+}
 
 async function locateOnce(): Promise<Near[]> {
-  const loc = await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
-  log('gps', loc?.latitude, loc?.longitude, 'acc', loc?.accuracy)
+  const since = Date.now()
+  let loc: Loc | null = await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
+  log('gps', loc?.latitude, loc?.longitude, 'acc', loc?.accuracy, 'ts', loc?.timestamp, 'age', loc ? ageSec(loc) : null)
+  gpsStale = false
+  const age = loc ? ageSec(loc) : null
+  if (loc && age != null && age * 1000 > GPS_FRESH_MS) {
+    // 묵은 위치다. 새 측위를 기다린다. 안 오면 묵은 것을 쓰되 그렇다고 말한다.
+    const fresh = await waitFreshFix(since)
+    if (fresh) loc = fresh
+    else gpsStale = true
+    log('gps fresh', fresh ? 'yes' : 'no', 'stale age', age)
+  }
   if (!loc || !Number.isFinite(loc.latitude)) return []
   // 오차가 커도 버리지 않는다. 실내나 지하에서는 1km를 넘는 것이 흔하다.
   // 버리면 사용자에게 아무것도 남지 않는다. 후보를 더 주고 불확실하다고 말한다.
   gpsRough = (loc.accuracy ?? 0) > MAX_ACCURACY_M
-  return nearest(loc.latitude, loc.longitude, COORDS, gpsRough ? 12 : 8)
+  return nearest(loc.latitude, loc.longitude, COORDS, gpsRough || gpsStale ? 12 : 8)
 }
 
 // 첫 호출이 null을 주는 것을 실기기에서 봤다. 한 번 더 부른다.
@@ -470,6 +520,10 @@ async function showOrigin(): Promise<void> {
   // 안내행은 고를 수 없어야 한다. rows의 빈 문자열이 onTap을 다시 시도로 보낸다.
   if (!near.length) {
     items.unshift('위치를 찾지 못했습니다 · 최근 출발역')
+    rows = ['', ...names]
+  } else if (gpsStale) {
+    // 호스트가 마지막 위치만 주고 새 측위가 안 왔다. 지금 자리와 다를 수 있다.
+    items.unshift('위치가 오래됐습니다 · 직접 고르세요')
     rows = ['', ...names]
   } else if (gpsRough) {
     items.unshift('위치가 정확하지 않습니다 · 직접 고르세요')
