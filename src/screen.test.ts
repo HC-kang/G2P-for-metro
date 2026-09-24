@@ -19,7 +19,7 @@ const riding = (over: Partial<Parameters<typeof S.riding>[0]> = {}) => S.riding(
 })
 
 const waiting = () => S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산', from: '노원', etaSec: 180, refresh: R })
-const transfer = () => S.transfer({ now: T, station: '교대', from: '2호선', to: '3호선', toward: '경복궁', rest: 3, minutes: 10 })
+const transfer = () => S.transfer({ now: T, station: '교대', from: '2호선', to: '3호선', toward: '경복궁', rest: 3, minutes: 10, finalDest: '안국' })
 const lost = () => S.lost({ now: T, last: '선릉', agoSec: 52, guess: '역삼', dest: '강남', stopsLeft: 3, bar: S.track(6, 3, 2), refresh: R })
 const alight = (n: number) => S.alight({ now: T, stopsLeft: n, dest: '하계', next: '중계', minutes: n * 2 })
 
@@ -94,7 +94,7 @@ test('track은 관측, 추정, 남은 역, 하차역을 그린다', () => {
   assert.equal(S.track(6, 3, 2), '●●◌◌○◎')   // index=3, estimated=2 → 2·3번 칸이 추정
   assert.equal(S.track(6, 0, 0), '●○○○○◎')
   const bar = S.track(30, 20, 0, 10)
-  assert.ok(bar.startsWith('⋯') && bar.endsWith('◎') && bar.length === 10, bar)
+  assert.ok(bar.startsWith('─') && bar.endsWith('◎') && bar.length === 10, bar)
 })
 
 test('riding은 지금 어디인지와 다음 역을 함께 보여준다', () => {
@@ -135,7 +135,7 @@ test('alight는 남은 정거장에 따라 말을 바꾼다', () => {
 test('transfer는 환승 뒤 남은 여정을 보여준다', () => {
   const s = transfer()
   assert.ok(s.includes('3호선') && s.includes('경복궁'))
-  assert.ok(s.includes('남은 3정거장') && s.includes('18:52 도착 예정'), s)
+  assert.ok(s.includes('안국 18:52 도착') && s.includes('3정거장'), s)
   assert.ok(s.includes('방면 승강장으로'), s)
   // 사용자에게 다음 열차를 고르라고 시키지 않는다. 앱이 찾는다고 말한다.
   assert.ok(s.includes('다음 열차를 찾는 중') && !s.includes('다음 열차 고르기'), s)
@@ -233,4 +233,58 @@ test('기다리는 화면의 스피너는 매초 다른 모양이고 안경 폰�
   assert.ok(a.split('\n')[0].includes(frames[0]) && b.split('\n')[0].includes(frames[1]), a + '\n' + b)
   const noFix = S.waiting({ now: T, line: '7호선', toward: '장암', at: '', from: '노원', etaSec: 180, refresh: R })
   assert.ok(noFix.includes(S.spin(T)) && transfer().includes(S.spin(T)), '기다리는 화면에 스피너가 없습니다')
+})
+
+// 모든 역 이름으로 모든 화면을 그려 본다. 경로 6개만 보던 테스트가 '동대문역사문화공원'류의 넘침을 놓쳤다.
+test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', async () => {
+  const { NAMES, transferLines } = await import('./stations.ts')
+  const line = [...new Set(NAMES.flatMap(n => transferLines(n)))].sort((a, b) => S.cols(b) - S.cols(a))[0]
+  for (const n of NAMES) {
+    for (const note of [undefined, '경로 변경', '반대 방향', '지선 이탈', '경로 그대로']) {
+      const base = { now: T, line, note, refresh: R, next: n, legDest: n, stopsLeft: 12, paceMs: 120000, pathLen: 13, index: 0 }
+      ok(S.riding({ ...base, at: { station: n, label: '부근 (추정)' }, estimated: 1, transfer: { line, finalDest: n, finalMinutes: 55 } }), `riding 환승 ${n} ${note}`)
+      ok(S.riding({ ...base, at: { station: n, label: '출발' }, estimated: 0 }), `riding ${n} ${note}`)
+    }
+    ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, minutes: 4, note: '지선 이탈' }), `alight2 ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 1, dest: n, next: n, minutes: 2 }), `alight1 ${n}`)
+    ok(S.arrived(T, n), `arrived ${n}`)
+    ok(S.transfer({ now: T, station: n, from: line, to: '9호선', toward: n, rest: 23, minutes: 50, finalDest: n, note: '반대 방향' }), `transfer ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, minutes: 4, then: line }), `alight 환승 ${n}`)
+    ok(S.waiting({ now: T, line, toward: n, at: `${n} 출발`, from: n, etaSec: 300, refresh: R }), `waiting ${n}`)
+    ok(S.lost({ now: T, last: n, agoSec: 200, guess: n, dest: n, stopsLeft: 12, bar: S.track(13, 3, 2), refresh: R }), `lost ${n}`)
+    const legs = [{ line, stops: [n, n] }, { line, stops: [n, n] }, { line, stops: [n, n] }]
+    ok(S.route({ now: T, from: n, to: n, legs, stops: 30, minutes: 60, quota: '오늘 조회 850/1000' }), `route ${n}`)
+    ok(S.loading(T, [`${n}에`, '오는 열차가 아직 없습니다'], [`${n} 방면 ·`, '30초 뒤 다시 확인'], '탭: 지금 확인\n  더블탭: 처음으로'), `loading ${n}`)
+    ok(S.notice(T, `${n}에서 내리세요`, '여기서는 목적지까지 경로를 찾지 못했습니다', '탭: 처음으로\n  더블탭: 종료'), `stranded ${n}`)
+    ok(S.notice(T, '경로를 찾지 못했습니다', `${n} → ${n}`, '탭: 도착지 다시 고르기'), `noroute ${n}`)
+    for (const h of [S.listHead(T, `${n} →`, '목적지'), S.listHead(T, `→ ${n}`, '경로'), S.listHead(T, `${n} ${line}`, line)]) ok(h, `listHead ${n}`)
+  }
+})
+
+test('넘치는 줄은 띄어쓰기에서 접히고 들여쓰기를 지킨다', () => {
+  const s = S.notice(T, '제목', '여기서는 목적지까지 경로를 찾지 못했습니다', '탭: 처음으로')
+  const body = s.split('\n').filter(l => l.includes('목적지') || l.includes('못했습니다'))
+  assert.equal(body.length, 2, s)
+  assert.ok(body.every(l => l.startsWith('  ') && !l.startsWith('   ')), s)
+  assert.ok(!s.includes('목 적') && !s.includes('못했습 니다'), '낱말 가운데서 접혔습니다')
+})
+
+test('목록 항목은 넘치는 것만 단계를 내린다', () => {
+  const out = S.rows(['홍대입구', '동대문역사문화공원'],
+    n => `${n === '홍대입구' ? 19 : 20}정거장 · 약 46분 · 환승 1`, () => '약 46분')
+  assert.equal(out[0], '홍대입구  19정거장 · 약 46분 · 환승 1')
+  assert.equal(out[1], '동대문역사문화공원  약 46분')
+})
+
+test('조사 으로/로는 받침을 따른다', () => {
+  assert.equal(S.ro('4호선'), '4호선으로')
+  assert.equal(S.ro('공항철도'), '공항철도로')
+  assert.equal(S.ro('GTX-A'), 'GTX-A로')
+  assert.equal(S.ro('신림선'), '신림선으로')
+})
+
+test('환승역 하차 안내는 갈아탈 노선을 말한다', () => {
+  const s = S.alight({ now: T, stopsLeft: 2, dest: '노원', next: '중계', minutes: 4, then: '4호선' })
+  assert.ok(s.includes('4호선으로 환승') && s.split('\n')[0].includes('환승'), s)
+  assert.ok(!S.alight({ now: T, stopsLeft: 2, dest: '노원', next: '중계', minutes: 4 }).includes('환승'))
 })

@@ -15,7 +15,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
 import { plan, planHop, departures, locate, paceMs, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
-import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
+import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, sendTrail, setRequestGuard, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
@@ -57,17 +57,28 @@ const full = (content: string) => ({
   })],
 })
 
-const listOf = (items: string[]) => ({
-  containerTotalNum: 1,
+// 목록 위에 한 줄짜리 머리줄(현재시각과 제목)을 얹는다. SDK는 한 페이지에 컨테이너 12개까지 허용한다.
+// 컨테이너 번호를 텍스트 페이지(1)와 겹치지 않게 둔다. 틱의 글자 갈아끼우기가 목록 페이지에 잘못 떨어져도 아무 일이 없다.
+// 40이면 글자 한 줄(약 27px)과 위아래 여백(8px씩)이 안 들어가 스크롤 막대가 섰다(시뮬레이터 실측).
+const HEAD_H = 44
+const listOf = (items: string[], head?: string) => ({
+  containerTotalNum: head ? 2 : 1,
   listObject: [new ListContainerProperty({
-    xPosition: 0, yPosition: 0, width: 576, height: 288,
+    xPosition: 0, yPosition: head ? HEAD_H : 0, width: 576, height: 288 - (head ? HEAD_H : 0),
     borderWidth: 0, paddingLength: 8,
-    containerID: 1, containerName: 'rows',
+    containerID: 3, containerName: 'rows',
     itemContainer: new ListItemContainerProperty({
       itemCount: items.length, itemWidth: 560, isItemSelectBorderEn: 1, itemName: items,
     }),
     isEventCapture: 1,
   })],
+  ...(head ? {
+    textObject: [new TextContainerProperty({
+      xPosition: 0, yPosition: 0, width: 576, height: HEAD_H,
+      borderWidth: 0, paddingLength: 8,
+      containerID: 2, containerName: 'head', content: head, isEventCapture: 0,
+    })],
+  } : {}),
 })
 
 // 지금 안경에 떠 있는 것이 텍스트 페이지인지. 맞으면 내용만 갈아끼운다(가벼움).
@@ -82,6 +93,7 @@ async function show(content: string): Promise<void> {
     if (up) return
     log('upgrade false, rebuild', S.bytes(content))
   }
+  listHead = null
   const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(full(content)))
   pageIsText = !!ok
   if (ok) { showFails = 0; return }
@@ -96,12 +108,22 @@ async function show(content: string): Promise<void> {
   }
 }
 
-async function showList(items: string[]): Promise<boolean> {
+// 지금 떠 있는 목록 페이지의 머리줄을 만드는 함수. 틱이 매초 시계를 갈아끼운다. 목록 페이지가 아니면 null.
+let listHead: (() => string) | null = null
+
+async function showList(items: string[], head?: () => string): Promise<boolean> {
   const fitted = S.fitsAll(items) ? items : S.fitItems(items)
-  const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(listOf(fitted)))
+  let ok = await bridge.rebuildPageContainer(new RebuildPageContainer(listOf(fitted, head?.())))
+  if (!ok && head) {
+    // 머리줄을 얹은 페이지를 기기가 거부하면 목록만 띄운다. 시계가 빠져도 고를 수는 있어야 한다.
+    log('list with head refused, retry without')
+    head = undefined
+    ok = await bridge.rebuildPageContainer(new RebuildPageContainer(listOf(fitted)))
+  }
   pageIsText = false
   current = null
-  log('list', ok, 'count', fitted.length, 'bytes', S.bytes(fitted.join('')))
+  listHead = ok && head ? head : null
+  log('list', ok, 'count', fitted.length, 'bytes', S.bytes(fitted.join('')), 'head', !!listHead)
   return !!ok
 }
 
@@ -122,7 +144,10 @@ if (import.meta.env?.DEV) {
 }
 let recents = parseLines((await bridge.getLocalStorage('recentOrigins')) ?? '', 5)
 // 마지막으로 도착한 역. 위치가 없거나 묵었을 때 가장 그럴듯한 출발역이다.
-let lastArrived = (await bridge.getLocalStorage('lastArrived')) ?? ''
+// 'name\tms'. 방금 내린 역이면 GPS보다 확실한 출발역이다.
+const [savedArrived = '', savedArrivedAt = '0'] = ((await bridge.getLocalStorage('lastArrived')) ?? '').split('\t')
+let lastArrived = savedArrived
+let lastArrivedAt = Number(savedArrivedAt) || 0
 // 출발역·도착지마다 지난번에 고른 경로를 기억한다. 늘 같은 길로 다니는 사람이 대부분이다.
 const savedQuota = ((await bridge.getLocalStorage('quota')) ?? '').split(':')
 const prefs = new Map(((await bridge.getLocalStorage('prefs')) ?? '').split('\n')
@@ -235,7 +260,7 @@ function renderDests(): void {
       dests = dests.filter(d => d !== name)
       await saveDests()
       renderDests()
-      await showOrigin()
+      await refreshGlasses()
     })
 
     const nm = document.createElement('span')
@@ -263,11 +288,11 @@ function renderDests(): void {
 }
 
 function renderHits(): void {
-  const q = qEl.value.trim()
+  const q = normName(qEl.value.trim())
   goEl.disabled = !q || dests.includes(q) || dests.length >= MAX_DESTS
   hitsEl.replaceChildren()
   if (!q) return
-  const hits = NAMES.filter(n => n.startsWith(q) && !dests.includes(n)).slice(0, 6)
+  const hits = matches(q).filter(n => !dests.includes(n)).slice(0, 6)
   for (const name of hits) {
     const li = document.createElement('li')
     li.tabIndex = 0
@@ -292,15 +317,29 @@ async function add(name: string): Promise<void> {
   qEl.value = ''
   renderHits()
   renderDests()
-  await showOrigin()
+  await refreshGlasses()
 }
+
+// 폰에서 자주 가는 곳을 고치면 안경이 그 목록을 보고 있을 때만 다시 그린다.
+// 예전에는 무조건 출발역 화면으로 돌아가 주행 중 추적이 끊겼다.
+async function refreshGlasses(): Promise<void> {
+  if (busy) return
+  if (mode === 'dest') return showDest()
+  if (mode === 'origin' && !rows.some(Boolean)) return showOrigin()   // 막다른 안내 화면이었다
+}
+
+// '홍대입구역'처럼 '역'을 붙여 쳐도 찾는다. 앞부분이 안 맞으면 가운데라도 맞는 역을 찾는다('문화공원').
+const normName = (q: string): string =>
+  !NAMES.includes(q) && q.endsWith('역') && NAMES.includes(q.slice(0, -1)) ? q.slice(0, -1) : q
+const matches = (q: string): string[] =>
+  [...NAMES.filter(n => n.startsWith(q)), ...NAMES.filter(n => !n.startsWith(q) && n.includes(q))]
 
 qEl.addEventListener('input', renderHits)
 $<HTMLFormElement>('#add').addEventListener('submit', async e => {
   e.preventDefault()
-  const q = qEl.value.trim()
+  const q = normName(qEl.value.trim())
   // 정확히 맞는 역이 없으면 첫 후보를 넣는다. 오타로 빈 항목이 생기지 않는다.
-  await add(NAMES.includes(q) ? q : (NAMES.find(n => n.startsWith(q)) ?? q))
+  await add(NAMES.includes(q) ? q : (matches(q)[0] ?? q))
 })
 // 진단 기록. 지난 실행에서 남긴 것도 함께 보여준다.
 const logView = $<HTMLPreElement>('#logview')
@@ -331,7 +370,7 @@ $('#glyph').addEventListener('click', async () => {
   stopPolling(); stopOriginWatch(); stopTransferWatch()
   mode = 'arrived'   // 탭하면 처음으로
   rows = []
-  const lines = ['1 ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏', '2 ◐◓◑◒ ◌ ◎ ◉', '3 ▁▂▃▄▅▆▇█ ░▒▓', '4 ←→↑↓ ⇢ ➜ ▶ ▷', '5 ●○━─ ✓ ✗ ⏳', '6 ★☆ ♥ ⌛ ⚠']
+  const lines = ['1 ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏', '2 ◐◓◑◒ ◌ ◎ ◉', '3 ▁▂▃▄▅▆▇█ ░▒▓', '4 ←→↑↓ ⇢ ➜ ▶ ▷', '5 ●○━─ ✓ ✗ ⏳', '6 ★☆ ♥ ⌛ ⚠', '7 · ≈ ⋯ ▸ … ▪ ◆ ◇']
   await showLive(() => [`  현재시각 ${S.hhmmss(Date.now())}  글리프 시험`, '', ...lines.map(l => `  ${l}`), '', '  탭: 처음으로'].join('\n'))
   sentEl.textContent = '안경에 글리프 시험 화면을 띄웠습니다. 보이는 줄 번호가 답입니다.'
 })
@@ -373,6 +412,7 @@ let stops: string[] = []
 let train: Arrival | null = null
 let boardedAt = 0            // 열차를 고른 시각. 도착 예정 시간을 깎는 데 쓴다.
 let approach = ''            // 아직 승강장에 오지 않은 열차의 현재 역
+let approachStatus = -1      // 그 역에서의 상태(진입·도착·출발)
 // '탭: 열차 다시 고르기'가 적힌 화면에서만 탭이 다시 고르기다.
 // 안내 없는 주행 화면에서 탭마다 도착 조회를 하면 답답해서 누를수록 한도가 샌다.
 let lastSeen = ''        // 직전 관측 역(경로 밖 포함). 진행 방향을 잡는 데 쓴다
@@ -401,11 +441,25 @@ const SHOW_FAIL_STOP = 3
 let showFails = 0
 
 // 매초 한 번. 주행 중이면 위치 추정까지 다시 계산하고, 그 밖의 텍스트 화면은 시계만 새로 쓴다.
+// 탭 처리 중(도착 정보를 기다리는 중)에도 시계와 스피너는 돌아야 한다. 예전에는 이때 멈춰서
+// 스피너가 가장 필요한 순간에 정지했다. 이때는 글자만 갈아끼운다. 페이지를 다시 만들면 처리 중인 전환과 부딪힌다.
+// 주행 모드의 current는 탑승 전 화면의 것이라 믿지 않는다. 주행 화면은 render가 그린다.
 const ticker = setInterval(() => {
-  if (rendering || busy || showFails >= SHOW_FAIL_STOP) return
-  if (mode === 'riding') void render()
+  if (rendering || showFails >= SHOW_FAIL_STOP) return
+  if (listHead) void tickHead(listHead())
+  else if (busy) { if (pageIsText && current && mode !== 'riding') void tickText(current()) }
+  else if (mode === 'riding') void render()
   else if (current) void show(current())
 }, TICK_MS)
+
+async function tickText(content: string): Promise<void> {
+  await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'main', content }))
+}
+async function tickHead(content: string): Promise<void> {
+  const ok = await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 2, containerName: 'head', content }))
+  // 머리줄 갱신이 거부되면 매초 때리지 않는다. 목록은 그대로 쓸 수 있다.
+  if (!ok && listHead) { log('head upgrade false, stop'); listHead = null }
+}
 
 // 시계가 있는 화면은 이것으로 띄운다. 틱이 같은 함수를 다시 불러 초를 갱신한다.
 async function showLive(build: () => string): Promise<void> {
@@ -467,6 +521,10 @@ function stopPolling(): void {
 // 그래서 묵은 위치라도 일단 최선의 추정으로 목록을 띄우고, 새 측위를 계속 받아 조용히 고쳐 나간다.
 // 사용자에게 "직접 고르세요"라고 시키지 않는다. 앱이 할 수 있는 일은 앱이 한다.
 const GPS_FRESH_MS = 30_000
+const RECENT_ARRIVAL_MS = 20 * 60_000
+// '약 0m'는 읽기 어색하다. 가까우면 말로 한다.
+const dist = (m: number, rough: boolean): string =>
+  m < 100 ? (rough ? '근처' : '바로 앞') : `${rough ? '약 ' : ''}${m < 1000 ? `${m}m` : `${(m / 1000).toFixed(1)}km`}`
 const ORIGIN_WATCH_MS = 180_000
 
 type Loc = { latitude: number; longitude: number; accuracy?: number; timestamp?: number }
@@ -531,6 +589,13 @@ function originCandidates(fix: Loc | null): { name: string; label: string }[] {
   const push = (name: string, label: string) => {
     if (name && !seen.has(name)) { seen.add(name); out.push({ name, label }) }
   }
+  // 방금 내린 역이 가장 확실한 출발역이다. 앱이 직접 본 도착이 묵은 GPS보다 낫다.
+  // 믿을 만한 새 측위가 1km 넘게 떨어진 곳을 가리킬 때만 양보한다. 그새 다른 곳으로 옮긴 것이다.
+  if (lastArrived && Date.now() - lastArrivedAt < RECENT_ARRIVAL_MS) {
+    const c = COORDS.find(c => c.name === lastArrived)
+    const moved = fix && !uncertain(fix) && c && distanceM(fix.latitude, fix.longitude, c.lat, c.lon) > 1000
+    if (!moved) push(lastArrived, `${lineLabel(lastArrived)}  방금 도착`)
+  }
   if (fix) {
     const unc = uncertain(fix)
     const near = nearest(fix.latitude, fix.longitude, COORDS, unc ? 12 : 8)
@@ -538,7 +603,7 @@ function originCandidates(fix: Loc | null): { name: string; label: string }[] {
     const score = (n: Near) =>
       n.meters - (unc && n.name === lastArrived ? 800 : 0) - (unc && recents.includes(n.name) ? 400 : 0)
     for (const n of [...near].sort((a, b) => score(a) - score(b))) {
-      push(n.name, `${lineLabel(n.name)}  ${unc ? '≈' : ''}${n.meters}m`)
+      push(n.name, `${lineLabel(n.name)}  ${dist(n.meters, unc)}`)
     }
   }
   push(lastArrived, `${lineLabel(lastArrived)}  지난 도착`)
@@ -573,7 +638,7 @@ async function renderOrigin(fix: Loc | null): Promise<boolean> {
     items.unshift(`오늘 조회 ${used}/${QUOTA_DAY} · KST 자정에 초기화`)
     rows = ['', ...rows]
   }
-  if (!(await showList(items))) {
+  if (!(await showList(items, () => S.listHead(Date.now(), '출발역')))) {
     rows = []
     await showLive(() => S.loading(Date.now(), '목록을 표시하지 못했습니다', '다시 그리는 중', '더블탭: 종료'))
   }
@@ -614,7 +679,12 @@ async function showOrigin(): Promise<void> {
   stopOriginWatch()
   const gen = ++originGen
   const since = Date.now()
+  // 위치가 금방 오면 목록으로 바로 간다. 늦으면(실기기에서 최대 10초) 탭이 먹혔다는 것부터 보인다.
+  const slow = setTimeout(() => {
+    if (gen === originGen) void showLive(() => S.loading(Date.now(), '출발역 찾는 중', '위치 받는 중'))
+  }, 300)
   const quick = await quickFix()
+  clearTimeout(slow)
   log('gps', quick?.latitude, quick?.longitude, 'acc', quick?.accuracy, 'ts', quick?.timestamp, 'age', quick ? ageSec(quick) : null)
   if (gen !== originGen) return
   // 일단 지금 아는 것으로 띄운다. 묵은 위치든 지난 도착역이든, 없는 것보다 낫다.
@@ -633,7 +703,10 @@ async function showOrigin(): Promise<void> {
 
 async function showDest(): Promise<void> {
   mode = 'dest'
-  const shown = dests.filter(d => d !== origin)
+  // 이 출발역에서 최근에 간 곳을 위로 올린다. 안경에서 스크롤은 비싸다. 한 번도 안 간 곳은 폰에 넣은 순서다.
+  const recent = [...prefs.keys()].filter(k => k.startsWith(`${origin}>`)).map(k => k.slice(origin.length + 1)).reverse()
+  const rank = (d: string) => { const i = recent.indexOf(d); return i < 0 ? recent.length + dests.indexOf(d) : i }
+  const shown = dests.filter(d => d !== origin).sort((a, b) => rank(a) - rank(b))
   if (!shown.length) {
     rows = []
     return showLive(() => S.notice(Date.now(), '갈 곳이 없습니다', '폰 화면에서 자주 가는 곳을 넣으세요', '탭: 출발역 다시 고르기'))
@@ -641,13 +714,14 @@ async function showDest(): Promise<void> {
   rows = shown
   // 경로가 없는 곳도 숨기지 않는다. 사용자가 일부러 넣은 것이고,
   // 목록에서 사라지면 저장이 안 된 줄 안다. 왜 못 가는지 그 자리에서 말한다.
-  const items = S.rows(shown, d => {
-    const p = plan(origin, d)
-    if (!p) return '경로 없음'
-    const tail = p.legs.length > 1 ? ` · 환승 ${p.legs.length - 1}` : ''
-    return `${tripStops(p)}정거장 · 약 ${tripMinutes(p)}분${tail}`
-  })
-  if (!(await showList(items))) {
+  const plans = new Map(shown.map(d => [d, plan(origin, d)]))
+  const xfer = (p: Plan) => (p.legs.length > 1 ? ` · 환승 ${p.legs.length - 1}` : '')
+  const items = S.rows(shown,
+    d => { const p = plans.get(d); return p ? `${tripStops(p)}정거장 · 약 ${tripMinutes(p)}분${xfer(p)}` : '경로 없음' },
+    d => { const p = plans.get(d); return p ? `약 ${tripMinutes(p)}분${xfer(p)}` : '경로 없음' },
+    d => { const p = plans.get(d); return p ? `약 ${tripMinutes(p)}분` : '경로 없음' },
+  )
+  if (!(await showList(items, () => S.listHead(Date.now(), `${origin} →`, '목적지')))) {
     rows = []
     await showLive(() => S.notice(Date.now(), '목록을 표시하지 못했습니다', '', '탭: 출발역 다시 고르기'))
   }
@@ -692,7 +766,8 @@ function routeOptions(dest: string): Plan[] {
 async function chooseRoute(dest: string): Promise<void> {
   options = routeOptions(dest)
   if (!options.length) {
-    mode = 'dest'
+    // 'line' 모드에 빈 선택지를 두면 탭이 도착지 목록으로 돌아간다. 문구가 그렇게 약속한다.
+    mode = 'line'
     rows = []
     // 실시간 미지원 노선(인천·김포·용인·의정부)의 역은 그래프에 없어서 여기로 온다
     return showLive(() => S.notice(Date.now(), '경로를 찾지 못했습니다', `${origin} → ${dest}`, '탭: 도착지 다시 고르기'))
@@ -705,13 +780,17 @@ async function chooseRoute(dest: string): Promise<void> {
   const liked = prefs.get(`${origin}>${dest}`)
   const mark = (p: Plan) => (routeKey(p) === liked ? '★ ' : '')
   const head = (p: Plan) => `${mark(p)}${p.legs[0].line} ${p.legs[0].stops[1]}방면`
+  // 어디서 갈아타는지가 선택의 핵심이다. '환승 2'만으로는 두 길을 구별할 수 없었다.
+  const via = (p: Plan) => (p.legs.length > 1 ? `${p.legs.slice(1).map(l => l.stops[0]).join('·')} 환승` : '직통')
+  // ★가 붙으면 4바이트가 늘어 환승역이 빠졌다. 가장 중요한 행이다. '약'부터 버린다.
   const items = S.tiers(
-    options.map(p => `${head(p)}  ${tripStops(p)}정거장 · 환승 ${p.legs.length - 1} · 약 ${tripMinutes(p)}분`),
-    options.map(p => `${head(p)}  ${tripStops(p)}정거장 · 약 ${tripMinutes(p)}분`),
+    options.map(p => `${head(p)}  ${via(p)} · 약 ${tripMinutes(p)}분`),
+    options.map(p => `${head(p)}  ${via(p)} · ${tripMinutes(p)}분`),
+    options.map(p => `${head(p)}  환승 ${p.legs.length - 1} · 약 ${tripMinutes(p)}분`),
     options.map(p => `${head(p)}  약 ${tripMinutes(p)}분`),
   )
   log('options', items.join(' / '))
-  if (!(await showList(items))) {
+  if (!(await showList(items, () => S.listHead(Date.now(), `→ ${dest}`, '경로')))) {
     rows = []
     await showLive(() => S.notice(Date.now(), '노선 목록을 표시하지 못했습니다', '', '탭: 도착지 다시 고르기'))
   }
@@ -722,6 +801,8 @@ async function startTrip(picked: Plan): Promise<void> {
   const dest = picked.to
   await rememberOrigin(origin)
   // 고른 길을 기억한다. 다음에 같은 구간이면 맨 위에 둔다.
+  // 지웠다가 다시 넣어 맨 뒤로 보낸다. 순서가 곧 최근 사용 순서다(목적지 정렬에 쓴다).
+  prefs.delete(`${origin}>${dest}`)
   prefs.set(`${origin}>${dest}`, routeKey(picked))
   const flat = [...prefs].slice(-40).map(([k, v]) => `${k}\t${v}`).join('\n')
   void bridge.setLocalStorage('prefs', flat)
@@ -732,12 +813,17 @@ async function startTrip(picked: Plan): Promise<void> {
     stops: tripStops(picked), minutes: tripMinutes(picked),
     quota: used >= QUOTA_WARN ? `오늘 조회 ${used}/${QUOTA_DAY}` : undefined,
   }))
-  await startLeg(0)
+  routeShownAt = Date.now()
+  await startLeg(0, true)
 }
+
+// 경로 요약 화면을 최소한 이만큼 보여준다. 조회가 빨리 끝나면 0.3초 만에 목록에 덮여 아무도 못 읽었다.
+const ROUTE_HOLD_MS = 1500
+let routeShownAt = 0
 
 // ---------- 탈 열차 ----------
 
-async function startLeg(i: number): Promise<void> {
+async function startLeg(i: number, quiet = false): Promise<void> {
   stopTransferWatch()
   legIndex = i
   autoRepicks = 0
@@ -746,21 +832,26 @@ async function startLeg(i: number): Promise<void> {
   approach = ''
   note = ''
   stranded = false
-  await showPick()
+  await showPick(true, quiet)
 }
 
 // autoBoard: 후보가 1대면 바로 태운다. 사용자가 "다시 고르기"로 왔을 때는 끈다.
 // 켜 둔 채로 다시 고르면 같은 열차를 또 태워서 아무 일도 없는 것처럼 보인다.
-async function showPick(autoBoard = true): Promise<void> {
+// quiet: 경로 요약 화면이 이미 '열차를 확인하는 중'을 보이고 있다. 그 위에 로딩을 덮지 않는다.
+async function showPick(autoBoard = true, quiet = false): Promise<void> {
   mode = 'pick'
   pickGen += 1
   const from = stops[0]
+  const ln = leg().line
   // 조회에 시간이 걸린다. 탭이 먹혔다는 것을 먼저 보여준다.
-  await showLive(() => S.loading(Date.now(), from, `${leg().line} 열차 확인 중`))
+  if (!quiet) await showLive(() => S.loading(Date.now(), from, `${ln} 열차 확인 중`))
+  const hold = () => (quiet ? new Promise(r => setTimeout(r, Math.max(0, routeShownAt + ROUTE_HOLD_MS - Date.now()))) : null)
   let all: Arrival[]
   try {
     all = await arrivals(from)
+    await hold()
   } catch (e) {
+    await hold()
     log('arrivals failed', e)
     rows = []
     if (e instanceof BurstError) {
@@ -779,6 +870,7 @@ async function showPick(autoBoard = true): Promise<void> {
     return showLive(() => S.loading(Date.now(), '도착 정보를 받지 못했습니다',
       `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 자동으로 다시 확인`, '탭: 지금 확인\n  더블탭: 처음으로'))
   }
+  if (queuedDouble) return   // 사용자가 이미 처음으로 가겠다고 했다
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
   // 방향은 "…방면" 역이 다음 역과 같은지로 가른다.
   // "…방면"은 급행이든 일반이든 인접한 다음 역이다. updnLine은 읽지 않는다.
@@ -797,7 +889,7 @@ async function showPick(autoBoard = true): Promise<void> {
     const until = Date.now() + wait * 1000
     retryPick(wait, 'no candidates')
     return showLive(() => S.loading(Date.now(), [`${from}에`, '오는 열차가 아직 없습니다'],
-      [`${toward()} 방면 ·`, `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`], '탭: 지금 확인\n  더블탭: 처음으로'))
+      [`${stops[1] ?? toward()} 방면 ·`, `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`], '탭: 지금 확인\n  더블탭: 처음으로'))
   }
   // 후보가 하나뿐이어도 "다시 고르기"로 온 경우에는 목록을 보여준다.
   // 자동으로 같은 열차를 다시 태우면 탭이 먹히지 않은 것처럼 보인다.
@@ -813,7 +905,7 @@ async function showPick(autoBoard = true): Promise<void> {
     candidates.map(a => `${when(a)}  ${a.toward}방면${a.express ? ' 급행' : ''}`),
     candidates.map(a => `${when(a)}  ${a.toward}방면`),
   )
-  if (!(await showList(items))) {
+  if (!(await showList(items, () => S.listHead(Date.now(), `${from} ${ln}`, ln)))) {
     rows = []
     retryPick(FAST_POLL ? 5 : 15, 'list failed')
     await showLive(() => S.loading(Date.now(), '열차 목록을 표시하지 못했습니다', '잠시 뒤 다시 그립니다', '더블탭: 처음으로'))
@@ -890,6 +982,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         // 고른 열차가 아직 승강장에 오지 않았다. 오는 중이다.
         misses = 0
         approach = me.station
+        approachStatus = me.status
         log('train approaching', me.station, 'at', new Date(me.at).toTimeString().slice(0, 8))
       } else {
         // 타고 있는데 경로 밖 역이 관측됐다. 반대 방향, 지나침, 지선 이탈 중 하나다.
@@ -962,15 +1055,29 @@ function applyDeviation(d: Deviation, seen: string, at: number): void {
 async function showMenu(): Promise<void> {
   menuOpen = true
   rows = [...MENU]
-  if (!(await showList([...MENU]))) { menuOpen = false; await render() }
+  if (!(await showList([...MENU], () => S.listHead(Date.now(), `${leg().line} · 메뉴`, '메뉴')))) { menuOpen = false; await render() }
 }
 
 async function replanHere(): Promise<void> {
-  if (!lastSeen) return showLive(() => S.notice(Date.now(), '아직 위치를 못 받았습니다', '', '탭: 메뉴'))
+  // 아직 안 탔다. 사용자는 이 구간의 출발역 승강장에 있다. 다가오는 열차의 위치는 사용자의 위치가 아니다.
+  // 실제로 겪었다: 하계에서 기다리는데 공릉에서 오는 열차를 보고 '공릉에서 재탐색'을 해 상봉 환승 경로로 바꿨다.
+  if (!fixes.length || !lastSeen) {
+    stopPolling()
+    origin = stops[0]
+    return chooseRoute(trip!.to)
+  }
   const d = deviation(leg(), lastSeen, prevSeen || null, atStatus, trip!.to)
-  if (d.kind === 'on') { note = ''; return render() }
+  // 바꿀 것이 없어도 확인했다고 말한다. 화면이 그대로면 탭이 먹혔는지 모른다.
+  if (d.kind === 'on') { flashNote('경로 그대로'); return render() }
+  if (d.kind === 'unknown') { flashNote('판단 보류'); return render() }
   applyDeviation(d, lastSeen, Date.now())
   return render()
+}
+
+// 잠깐만 머리줄에 띄우는 말. 그새 다른 말로 바뀌었으면 건드리지 않는다.
+function flashNote(text: string): void {
+  note = text
+  setTimeout(() => { if (note === text) { note = ''; void render() } }, 6000)
 }
 
 async function render(): Promise<void> {
@@ -991,7 +1098,7 @@ async function renderNow(): Promise<void> {
     if (approach || misses < 3) {
       return show(S.waiting({
         now, line: leg().line, toward: train!.dest || train!.toward,
-        at: approach, from: stops[0], etaSec,
+        at: approach ? `${approach} ${S.statusWord(approachStatus)}`.trim() : '', from: stops[0], etaSec,
         refresh: refresh(),
       }))
     }
@@ -1022,6 +1129,7 @@ async function renderNow(): Promise<void> {
       now, stopsLeft: left, dest, next: stops[guess.index + 1],
       minutes: Math.max(1, Math.round((pace * left) / 60_000)),
       note: note || undefined,
+      then: trip!.legs[legIndex + 1]?.line,
     }))
   }
 
@@ -1066,11 +1174,13 @@ async function arrive(): Promise<void> {
       toward: nextLeg.stops[1] ?? nextLeg.stops[nextLeg.stops.length - 1],
       rest: trip!.legs.slice(legIndex + 1).reduce((n, l) => n + l.stops.length - 1, 0),
       minutes: restMinutes(legIndex + 1),
+      finalDest: trip!.to,
     }))
   }
   mode = 'arrived'
   lastArrived = stops[stops.length - 1]
-  void bridge.setLocalStorage('lastArrived', lastArrived)
+  lastArrivedAt = Date.now()
+  void bridge.setLocalStorage('lastArrived', `${lastArrived}\t${lastArrivedAt}`)
   await showLive(() => S.arrived(Date.now(), lastArrived))
 }
 
@@ -1149,6 +1259,41 @@ async function onTap(index: number): Promise<void> {
   return showOrigin()                                            // arrived
 }
 
+// 처리 중에 들어온 더블탭은 버리지 않는다. '처음으로'와 '종료'는 언제든 먹어야 한다.
+// 실제로 겪었다: 경로 요약을 보여주는 1.5초와 도착 조회 동안 더블탭이 사라졌다.
+// 탭은 버린다. 목록 번호가 바뀐 다음 화면에 떨어지면 엉뚱한 것을 고른다.
+let queuedDouble = false
+
+async function handle(type: OsEventTypeList, index: number): Promise<void> {
+  busy = true
+  showFails = 0   // 사람이 만졌다. 화면 재구성을 다시 시도한다
+  try {
+    if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
+      // 루트 화면의 더블탭은 반드시 종료여야 한다 (Even Hub 요구사항)
+      // 도착 화면도 '더블탭: 종료'라고 적혀 있다. 예전에는 처음으로 가서 문구와 달랐다.
+      if (mode === 'origin' || mode === 'arrived') {
+        stopPolling(); stopOriginWatch(); stopTransferWatch()
+        await bridge.shutDownPageContainer(1)
+      } else await showOrigin()
+    } else if (type === OsEventTypeList.CLICK_EVENT) {
+      await onTap(index)
+    }
+  } catch (e) {
+    log('event failed', e)
+    stopPolling()
+    mode = 'origin'
+    rows = []
+    await showLive(() => S.notice(Date.now(), '오류', String(e).slice(0, 60), '탭: 처음으로\n  더블탭: 종료'))
+  } finally {
+    busy = false
+  }
+  if (queuedDouble) {
+    queuedDouble = false
+    log('queued double tap')
+    await handle(OsEventTypeList.DOUBLE_CLICK_EVENT, 0)
+  }
+}
+
 const unsubscribe = bridge.onEvenHubEvent(async event => {
   const type = eventTypeOf(event.listEvent) ?? eventTypeOf(event.textEvent) ?? eventTypeOf(event.sysEvent)
   if (type === OsEventTypeList.SYSTEM_EXIT_EVENT || type === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
@@ -1158,27 +1303,13 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
     clearInterval(ticker)
     return unsubscribe()
   }
-  if (type === null || busy) return
-  busy = true
-  showFails = 0   // 사람이 만졌다. 화면 재구성을 다시 시도한다
-  try {
-    if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
-      // 루트 화면의 더블탭은 반드시 종료여야 한다 (Even Hub 요구사항)
-      if (mode === 'origin') { stopPolling(); await bridge.shutDownPageContainer(1) }
-      else await showOrigin()
-    } else if (type === OsEventTypeList.CLICK_EVENT) {
-      // 하드웨어가 첫 항목의 currentSelectItemIndex를 생략한다
-      await onTap(event.listEvent?.currentSelectItemIndex ?? 0)
-    }
-  } catch (e) {
-    log('event failed', e)
-    stopPolling()
-    mode = 'origin'
-    rows = []
-    await showLive(() => S.notice(Date.now(), '오류', String(e), '탭: 처음으로\n  더블탭: 종료'))
-  } finally {
-    busy = false
+  if (type === null) return
+  if (busy) {
+    if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) queuedDouble = true
+    return
   }
+  // 하드웨어가 첫 항목의 currentSelectItemIndex를 생략한다
+  await handle(type, event.listEvent?.currentSelectItemIndex ?? 0)
 })
 
 // Vite HMR은 모듈을 다시 실행한다. 정리하지 않으면 옛 타이머와 이벤트 핸들러가 살아남아
@@ -1191,7 +1322,11 @@ if (import.meta.hot) {
   })
 }
 
-const started = await bridge.createStartUpPageContainer(
-  new CreateStartUpPageContainer(full(S.notice(Date.now(), 'Metro', '출발역을 찾는 중', ''))))
+const APP = import.meta.env?.VITE_APP_NAME ?? 'G2P for Metro'
+const booting = () => S.loading(Date.now(), APP, '출발역 찾는 중')
+const started = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(full(booting())))
 log('startup', started, location.href)
+// 위치가 늦게 오면(실기기에서 최대 10초) 시작 화면이 오래 남는다. 그동안에도 스피너가 돈다.
+pageIsText = started === 0
+current = booting
 await showOrigin()
