@@ -785,7 +785,11 @@ async function poll(gen: number): Promise<void> {
         approach = ''
         atStatus = me.status
         const last = fixes[fixes.length - 1]
-        if (!last || last.station !== me.station) fixes.push({ station: me.station, at: me.at })
+        if (!last || last.station !== me.station) {
+          fixes.push({ station: me.station, at: me.at })
+          // 열차 이동을 진단 기록에 남긴다. 이게 없으면 주행 중엔 req 줄만 보여 어디쯤인지 모른다.
+          log('fix', me.station, S.statusWord(me.status), 'left', stopsLeft(stops, me.station), 'pace', Math.round(paceMs(stops, fixes) / 1000) + 's')
+        }
       } else {
         // 고른 열차가 아직 승강장에 오지 않았다. 오는 중이다.
         misses = 0
