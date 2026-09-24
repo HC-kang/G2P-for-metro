@@ -9,6 +9,13 @@ export default defineConfig({
   plugins: [{
     name: 'device-log',
     configureServer(server) {
+      // 모사 GPS 피드. .dev/gps.json 을 그대로 돌려준다. 파일을 고치면 폰이 움직인 것이다.
+      // 앱은 개발 모드에서 ?gps=dev 일 때만 이것을 읽는다. 시뮬레이터 브리지엔 위치 API가 없다.
+      server.middlewares.use('/__gps', (_req, res) => {
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Cache-Control', 'no-store')
+        try { res.end(readFileSync('.dev/gps.json', 'utf8')) } catch { res.statusCode = 404; res.end('{}') }
+      })
       server.middlewares.use('/__log', (req, res) => {
         let body = ''
         req.on('data', c => (body += c))

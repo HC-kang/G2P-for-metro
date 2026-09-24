@@ -461,7 +461,18 @@ const ageSec = (l: Loc): number | null => {
 }
 
 // 갱신을 켜고, 요청한 시각 이후에 찍힌 좌표가 오면 그것을 쓴다. 안 오면 null.
-function waitFreshFix(since: number): Promise<Loc | null> {
+async function waitFreshFix(since: number): Promise<Loc | null> {
+  if (simFeed) {
+    // 모사 피드는 밀어주지 않으니 0.5초마다 다시 읽는다. 브리지 경로와 같은 판정이다.
+    const t0 = Date.now()
+    while (Date.now() - t0 < GPS_WAIT_FRESH_MS) {
+      const l = await simLocation()
+      const t = l ? tsMs(l.timestamp) : null
+      if (l && t != null && t >= since) return l
+      await new Promise(r => setTimeout(r, 500))
+    }
+    return null
+  }
   return new Promise(resolve => {
     let done = false
     const finish = (l: Loc | null) => {
@@ -484,20 +495,35 @@ function waitFreshFix(since: number): Promise<Loc | null> {
   })
 }
 
-// 시뮬레이터는 위치 API를 모른다(브리지 메서드 목록에 없다). 개발 모드에서만 URL로 좌표를 넣는다.
-//   http://localhost:5173/?lat=37.6350&lon=127.0645
+// 시뮬레이터는 위치 API를 모른다(브리지 메서드 목록에 없다). 개발 모드에서만 모사한다.
+//   ?lat=37.6350&lon=127.0645   고정 좌표
+//   ?gps=dev                    dev 서버의 /__gps 피드(.dev/gps.json: {lat, lon, acc?, ts?})를 읽는다.
+//                               파일을 고치면 폰이 움직인 것이고, ts를 묵히면 묵은 위치를 모사한다.
 // 배포본은 이 코드를 타지 않는다.
-const simLocation = (): Loc | null => {
-  if (!import.meta.env?.DEV) return null
-  const q = new URLSearchParams(location.search)
-  const lat = Number(q.get('lat')), lon = Number(q.get('lon'))
+const devQuery = import.meta.env?.DEV ? new URLSearchParams(location.search) : null
+const simFeed = devQuery?.get('gps') === 'dev'
+
+async function simLocation(): Promise<Loc | null> {
+  if (!devQuery) return null
+  if (simFeed) {
+    try {
+      const r = await fetch('/__gps', { cache: 'no-store' })
+      if (!r.ok) return null
+      const j = await r.json() as { lat?: number; lon?: number; acc?: number; ts?: number }
+      if (!Number.isFinite(j.lat) || !Number.isFinite(j.lon)) return null
+      return { latitude: j.lat!, longitude: j.lon!, accuracy: j.acc ?? 5, timestamp: j.ts ?? Date.now() }
+    } catch {
+      return null
+    }
+  }
+  const lat = Number(devQuery.get('lat')), lon = Number(devQuery.get('lon'))
   return Number.isFinite(lat) && Number.isFinite(lon) ? { latitude: lat, longitude: lon, accuracy: 5, timestamp: Date.now() } : null
 }
 
 async function locateOnce(): Promise<Near[]> {
   const since = Date.now()
-  const sim = simLocation()
-  if (sim) log('gps sim', sim.latitude, sim.longitude)
+  const sim = await simLocation()
+  if (sim) log('gps sim', sim.latitude, sim.longitude, 'ts', sim.timestamp)
   let loc: Loc | null = sim ?? await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
   log('gps', loc?.latitude, loc?.longitude, 'acc', loc?.accuracy, 'ts', loc?.timestamp, 'age', loc ? ageSec(loc) : null)
   gpsStale = false
