@@ -11,7 +11,8 @@ export const bytes = (s: string): number => enc.encode(s).length
 // 실기기에서 재지 않은 값이다. 넘치면 줄이 접혀 아래가 밀린다.
 // 가로줄 34개(68칸)를 넣었다가 화면이 깨진 적이 있다. 보수적으로 잡는다.
 export const MAX_COLS = 32
-export const MAX_LINES = 12
+// 시뮬레이터 실측(2026-09-24): 11줄이면 마지막 줄이 반쯤 잘리고 스크롤바가 선다. 10줄까지 보인다.
+export const MAX_LINES = 10
 export const cols = (s: string): number =>
   Math.max(0, ...s.split('\n').map(l => [...l].reduce((n, c) => n + (c.charCodeAt(0) > 0x2000 ? 2 : 1), 0)))
 
@@ -143,7 +144,6 @@ export function riding(a: {
     `${PAD}${refreshLine(a.refresh)}`,
     '',
     `${PAD}다음   ${hero(a.next, 9)}`,
-    '',
     `${PAD}${track(a.pathLen, a.index, a.estimated)}`,
     ...(a.transfer
       ? [
