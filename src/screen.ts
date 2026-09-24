@@ -111,6 +111,20 @@ const screen = (...lines: (string | null)[]) => lines.filter(l => l !== null).jo
 // 오른쪽 정렬은 폭을 알아야 하므로 쓰지 않는다.
 const head = (now: number, context = '') => `${PAD}현재시각 ${hhmmss(now)}${context ? `  ${context}` : ''}`
 
+// 기다리는 화면에는 반드시 스피너를 넣는다. "앱이 진짜 돌고 있나"를 보이는 것이 목적이다(사용자 원칙).
+// 실기기에서 확인된 글리프만 쓴다. ◐◓◑◒는 안경 폰트에 없어 조용히 멈춘 것처럼 보였다. 틱이 1초라 한 칸씩 돈다.
+const SPIN = ['●○○○', '○●○○', '○○●○', '○○○●']
+export const spin = (now: number): string => SPIN[Math.floor(now / 1000) % SPIN.length]
+
+// 무언가를 기다리는 화면. 머리줄 오른쪽에서 스피너가 돈다.
+// 제목과 본문은 [앞, 뒤] 쌍으로 주면 넘칠 때 두 줄로 나뉜다. '공릉(서울산업대입구)에 오는 열차가…'는 한 줄에 안 들어간다.
+type Text = string | [string, string]
+const lines = (t: Text): string[] => typeof t === 'string' ? [`${PAD}${t}`] : pair(t[0], t[1])
+export function loading(now: number, title: Text, body: Text, hint = ''): string {
+  return screen(head(now, spin(now)), '', ...lines(title), '', ...(body ? lines(body) : []), '',
+    ...hint.split('\n').filter(Boolean).map(h => `${PAD}${h}`))
+}
+
 // 머리줄이 넘치면 행선지를 버리고 노선만 남긴다.
 // '동대문역사문화공원행'은 그것만으로 20칸이다.
 const context = (now: number, line: string, toward: string): string => {
@@ -180,7 +194,7 @@ export function transfer(a: { now: number; station: string; from: string; to: st
     `${PAD}${a.toward} 방면 승강장으로`,
     ...pair(`남은 ${a.rest}정거장 ·`, `${hhmm(a.now + a.minutes * 60_000)} 도착 예정`),
     // 사용자에게 시키지 않는다. 타던 열차가 떠나면 앱이 다음 열차를 찾는다. 탭은 지름길일 뿐이다.
-    `${PAD}자동으로 다음 열차를 찾습니다`,
+    `${PAD}다음 열차를 찾는 중  ${spin(a.now)}`,
     `${PAD}탭: 지금 바로`,
   )
 }
@@ -194,7 +208,7 @@ export function waiting(a: { now: number; line: string; toward: string; at: stri
     head(a.now, context(a.now, a.line, a.toward)), '',
     `${PAD}열차가 오는 중`, '',
     // 아직 위치를 못 받았으면 '현재 확인 중'이 아니라 '위치 확인 중'이라고 쓴다.
-    `${PAD}${a.at ? `현재 ${a.at}` : '위치 확인 중'}`,
+    `${PAD}${a.at ? `현재 ${a.at}` : `위치 확인 중  ${spin(a.now)}`}`,
     `${PAD}${refreshLine(a.refresh)}`,
     `${PAD}${eta}`, '',
     `${PAD}탭: 메뉴`,
@@ -229,7 +243,7 @@ export function route(a: {
     ...pair(`${a.from} →`, a.to),
     `${PAD}${a.stops}정거장 · ${hhmm(a.now + a.minutes * 60_000)} 도착 예정`, '',
     ...body, '',
-    `${PAD}열차를 확인하는 중`,
+    `${PAD}열차를 확인하는 중  ${spin(a.now)}`,
     a.quota ? `${PAD}${a.quota}` : null,
   )
 }

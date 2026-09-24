@@ -138,7 +138,7 @@ test('transfer는 환승 뒤 남은 여정을 보여준다', () => {
   assert.ok(s.includes('남은 3정거장') && s.includes('18:52 도착 예정'), s)
   assert.ok(s.includes('방면 승강장으로'), s)
   // 사용자에게 다음 열차를 고르라고 시키지 않는다. 앱이 찾는다고 말한다.
-  assert.ok(s.includes('자동으로 다음 열차를 찾습니다') && !s.includes('다음 열차 고르기'), s)
+  assert.ok(s.includes('다음 열차를 찾는 중') && !s.includes('다음 열차 고르기'), s)
   ok(s, 'transfer')
 })
 
@@ -163,6 +163,8 @@ test('모든 화면이 현재시각을 밝히고 한도를 지킨다', () => {
     ['arrived', S.arrived(T, '하계')],
     ['transfer', transfer()], ['waiting', waiting()], ['lost', lost()],
     ['notice', S.notice(T, '머리말', '본문입니다', '탭: 처음으로\n더블탭: 종료')],
+    ['loading', S.loading(T, ['공릉(서울산업대입구)에', '오는 열차가 아직 없습니다'], ['동대문역사문화공원 방면 ·', '30초 뒤 다시 확인'], '탭: 지금 확인\n  더블탭: 처음으로')],
+    ['loading 짧게', S.loading(T, '노원', '수인분당선 열차 확인 중')],
   ]
   for (const [name, s] of screens) {
     assert.ok(s.split('\n')[0].includes('현재시각 18:42:00'), `${name}: 첫 줄에 초 단위 현재시각이 없습니다\n${s}`)
@@ -219,4 +221,16 @@ test('route 화면은 한도 경고를 붙일 수 있다', () => {
   const warned = S.route({ ...p, quota: '오늘 조회 850/1000' })
   assert.ok(warned.includes('850/1000'), warned)
   ok(warned, 'route 경고')
+})
+
+// 기다리는 화면에는 반드시 스피너가 돈다. 1초마다 한 칸, 네 칸 뒤 처음으로.
+test('기다리는 화면의 스피너는 매초 다른 칸이 켜지고 확인된 글리프만 쓴다', () => {
+  const frames = [0, 1, 2, 3].map(i => S.spin(T + i * 1000))
+  assert.equal(new Set(frames).size, 4)
+  assert.equal(S.spin(T + 4000), frames[0])
+  for (const f of frames) assert.match(f, /^[●○]{4}$/)
+  const a = S.loading(T, '노원', '7호선 열차 확인 중'), b = S.loading(T + 1000, '노원', '7호선 열차 확인 중')
+  assert.ok(a.split('\n')[0].includes(frames[0]) && b.split('\n')[0].includes(frames[1]), a + '\n' + b)
+  const noFix = S.waiting({ now: T, line: '7호선', toward: '장암', at: '', from: '노원', etaSec: 180, refresh: R })
+  assert.ok(noFix.includes(S.spin(T)) && transfer().includes(S.spin(T)), '기다리는 화면에 스피너가 없습니다')
 })

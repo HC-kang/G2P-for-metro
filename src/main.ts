@@ -172,7 +172,7 @@ function guard(path: string): void {
   recentCalls.push(now)
   lastReqAt = now
   used += 1
-  log('req', path, 'dt', dt + 's', 'mode', mode, 'n', used)
+  log('req', path, 'dt', lastReqAt ? dt + 's' : '-', 'mode', mode, 'n', used)
   void bridge.setLocalStorage('quota', `${usedDay}:${used}`)
 }
 setRequestGuard(guard)
@@ -325,6 +325,15 @@ $('#send').addEventListener('click', async () => {
     + `| ${new Date().toISOString()} | 조회 ${used}/${QUOTA_DAY} | 도착지 ${dests.length}곳 --`
   const ok = await sendTrail([head, prevTrail, ...trail].filter(Boolean).join('\n'))
   sentEl.textContent = ok ? '보냈습니다.' : '보내지 못했습니다. 네트워크를 확인하세요.'
+})
+$('#glyph').addEventListener('click', async () => {
+  // 안경 폰트의 글리프 유무는 실기기에서만 안다. 줄 번호로 보고받아 스피너 글리프를 고른다.
+  stopPolling(); stopOriginWatch(); stopTransferWatch()
+  mode = 'arrived'   // 탭하면 처음으로
+  rows = []
+  const lines = ['1 ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏', '2 ◐◓◑◒ ◌ ◎ ◉', '3 ▁▂▃▄▅▆▇█ ░▒▓', '4 ←→↑↓ ⇢ ➜ ▶ ▷', '5 ●○━─ ✓ ✗ ⏳', '6 ★☆ ♥ ⌛ ⚠']
+  await showLive(() => [`  현재시각 ${S.hhmmss(Date.now())}  글리프 시험`, '', ...lines.map(l => `  ${l}`), '', '  탭: 처음으로'].join('\n'))
+  sentEl.textContent = '안경에 글리프 시험 화면을 띄웠습니다. 보이는 줄 번호가 답입니다.'
 })
 $('#resetQuota').addEventListener('click', async () => {
   // 폭주로 잘못 쌓인 값을 지운다. 실제 서울 API 한도는 이것과 무관하게 KST 자정에 돈다.
@@ -566,7 +575,7 @@ async function renderOrigin(fix: Loc | null): Promise<boolean> {
   }
   if (!(await showList(items))) {
     rows = []
-    await showLive(() => S.notice(Date.now(), '목록을 표시하지 못했습니다', '다시 그리는 중입니다', '더블탭: 종료'))
+    await showLive(() => S.loading(Date.now(), '목록을 표시하지 못했습니다', '다시 그리는 중', '더블탭: 종료'))
   }
   return true
 }
@@ -613,7 +622,7 @@ async function showOrigin(): Promise<void> {
   if (!shown) {
     rows = []
     // 위치도, 이력도, 자주 가는 곳도 없다. 이때만 사용자에게 말한다.
-    await showLive(() => S.notice(Date.now(), '출발역을 정하는 중', '위치를 받고 있습니다',
+    await showLive(() => S.loading(Date.now(), '출발역을 정하는 중', '위치 받는 중',
       dests.length ? '' : '자주 가는 곳을 넣어두면 위치 없이도 시작합니다'))
   }
   // 위치가 없거나 묵었으면 새 측위를 계속 받아 고쳐 나간다.
@@ -747,7 +756,7 @@ async function showPick(autoBoard = true): Promise<void> {
   pickGen += 1
   const from = stops[0]
   // 조회에 시간이 걸린다. 탭이 먹혔다는 것을 먼저 보여준다.
-  await showLive(() => S.notice(Date.now(), `${from}`, `${leg().line} 도착 열차를 확인합니다`, '잠시만 기다리세요'))
+  await showLive(() => S.loading(Date.now(), from, `${leg().line} 열차 확인 중`))
   let all: Arrival[]
   try {
     all = await arrivals(from)
@@ -758,7 +767,7 @@ async function showPick(autoBoard = true): Promise<void> {
       // 시간이 되면 앱이 알아서 다시 조회한다. 초가 줄어드는 게 보이고, 더블탭으로 언제든 나갈 수 있다.
       const until = Date.now() + e.waitSec * 1000
       retryPick(e.waitSec + 1, 'burst')
-      return showLive(() => S.notice(Date.now(), '조회가 잦아 잠시 쉽니다',
+      return showLive(() => S.loading(Date.now(), '조회가 잦아 잠시 쉽니다',
         `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 자동으로 다시 확인`, '더블탭: 처음으로'))
     }
     // 한도 소진은 기다려도 낫지 않는다. 자정까지는 앱이 할 수 있는 게 없다.
@@ -767,7 +776,7 @@ async function showPick(autoBoard = true): Promise<void> {
     const wait = FAST_POLL ? 5 : 20
     const until = Date.now() + wait * 1000
     retryPick(wait, 'error')
-    return showLive(() => S.notice(Date.now(), '도착 정보를 받지 못했습니다',
+    return showLive(() => S.loading(Date.now(), '도착 정보를 받지 못했습니다',
       `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 자동으로 다시 확인`, '탭: 지금 확인\n  더블탭: 처음으로'))
   }
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
@@ -787,8 +796,8 @@ async function showPick(autoBoard = true): Promise<void> {
     const wait = FAST_POLL ? 8 : 30
     const until = Date.now() + wait * 1000
     retryPick(wait, 'no candidates')
-    return showLive(() => S.notice(Date.now(), `${from}에 오는 열차가 아직 없습니다`,
-      `${toward()} 방면 · ${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`, '탭: 지금 확인\n  더블탭: 처음으로'))
+    return showLive(() => S.loading(Date.now(), [`${from}에`, '오는 열차가 아직 없습니다'],
+      [`${toward()} 방면 ·`, `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`], '탭: 지금 확인\n  더블탭: 처음으로'))
   }
   // 후보가 하나뿐이어도 "다시 고르기"로 온 경우에는 목록을 보여준다.
   // 자동으로 같은 열차를 다시 태우면 탭이 먹히지 않은 것처럼 보인다.
@@ -807,7 +816,7 @@ async function showPick(autoBoard = true): Promise<void> {
   if (!(await showList(items))) {
     rows = []
     retryPick(FAST_POLL ? 5 : 15, 'list failed')
-    await showLive(() => S.notice(Date.now(), '열차 목록을 표시하지 못했습니다', '잠시 뒤 다시 그립니다', '더블탭: 처음으로'))
+    await showLive(() => S.loading(Date.now(), '열차 목록을 표시하지 못했습니다', '잠시 뒤 다시 그립니다', '더블탭: 처음으로'))
   }
 }
 
@@ -842,15 +851,17 @@ async function board(a: Arrival): Promise<void> {
   stopPolling()
   misses = 0
   nextPollAt = Date.now()
-  await poll(pollGen)
+  // 탭 핸들러 안에서는 busy라 poll이 조회를 건너뛴다. 실기기에서 첫 조회가 20초 늦었다. 핸들러가 끝난 직후에 돈다.
+  pollTimer = setTimeout(() => poll(pollGen, 'boarded'), 0)
 }
 
 // ---------- 추적 ----------
 
-async function poll(gen: number): Promise<void> {
+async function poll(gen: number, why = 'timer'): Promise<void> {
   if (gen !== pollGen || mode !== 'riding') return
   if (!busy) {
     try {
+      log('poll', why, 'gen', gen)
       const me = (await positions(leg().line)).find(t => t.trainNo === train!.trainNo)
       if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
       lastPollFailed = false
@@ -897,7 +908,7 @@ async function poll(gen: number): Promise<void> {
         if (gen === pollGen && mode === 'riding') {
           pollWait = e.waitSec * 1000
           nextPollAt = Date.now() + pollWait
-          pollTimer = setTimeout(() => poll(gen), pollWait)
+          pollTimer = setTimeout(() => poll(gen, 'burst'), pollWait)
         }
         return
       }
@@ -984,7 +995,7 @@ async function renderNow(): Promise<void> {
         refresh: refresh(),
       }))
     }
-    return showLive(() => S.notice(Date.now(), `${train!.trainNo}번 열차를 찾지 못했습니다`, `${leg().line} 실시간 정보에 ${misses}회 연속 없습니다`, '탭: 열차 다시 고르기\n  더블탭: 처음으로'))
+    return showLive(() => S.loading(Date.now(), `${train!.trainNo}번 열차를 찾지 못했습니다`, `${misses}회 연속 실시간 정보에 없음`, '탭: 열차 다시 고르기\n  더블탭: 처음으로'))
   }
 
   const left = stopsLeft(stops, stops[guess.index])
