@@ -14,7 +14,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
-import { plan, planHop, departures, locate, paceMs, stopsLeft, DEFAULT_PACE_MS, type Plan, type Fix } from './route.ts'
+import { plan, planHop, departures, locate, paceMs, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, sendTrail, setRequestGuard, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -346,6 +346,12 @@ renderHits()
 // ---------- 상태 ----------
 
 type Mode = 'origin' | 'dest' | 'line' | 'pick' | 'riding' | 'transfer' | 'arrived'
+// 주행 중 탭 메뉴. 목록 화면이 열려 있는 동안은 렌더가 그것을 덮지 않아야 한다.
+let menuOpen = false
+const MENU = ['계속 보기', '현위치에서 재탐색', '열차 다시 고르기', '처음으로'] as const
+// 이탈로 경로를 바꿨을 때 머리줄에 짧게 보이는 말
+let note = ''
+let stranded = false     // 내려야 하는데 거기서 경로를 못 찾은 상태
 let mode: Mode = 'origin'
 let rows: string[] = []      // 목록의 각 행이 뜻하는 값
 let origin = ''
@@ -358,7 +364,8 @@ let boardedAt = 0            // 열차를 고른 시각. 도착 예정 시간을
 let approach = ''            // 아직 승강장에 오지 않은 열차의 현재 역
 // '탭: 열차 다시 고르기'가 적힌 화면에서만 탭이 다시 고르기다.
 // 안내 없는 주행 화면에서 탭마다 도착 조회를 하면 답답해서 누를수록 한도가 샌다.
-let repickable = false
+let lastSeen = ''        // 직전 관측 역(경로 밖 포함). 진행 방향을 잡는 데 쓴다
+let prevSeen = ''
 let atStatus = -1            // 마지막 관측의 trainSttus. 0 진입, 1 도착, 2 출발
 // 초 단위 시계와 갱신 막대. 텍스트 화면이 떠 있는 동안 매초 다시 쓴다.
 // 초를 보여주면서 안 움직이면 멈춘 것처럼 보인다. 보여주려면 움직여야 한다.
@@ -424,7 +431,10 @@ const POLL_NEAR_MS = 15_000
 const POLL_WAIT_MS = 20_000
 const POLL_FAR_MS = 35_000
 
+// 개발 모드 ?poll=fast 면 5초. 시뮬레이터 시나리오를 몇 분 안에 돌리려고 둔다. 배포본은 타지 않는다.
+const FAST_POLL = !!import.meta.env?.DEV && new URLSearchParams(location.search).get('poll') === 'fast'
 function pollDelay(): number {
+  if (FAST_POLL) return 5_000
   if (!fixes.length) return POLL_WAIT_MS
   const g = locate(stops, fixes, Date.now())
   if (!g) return POLL_WAIT_MS
@@ -710,6 +720,8 @@ async function startLeg(i: number): Promise<void> {
   stops = leg().stops
   train = null
   approach = ''
+  note = ''
+  stranded = false
   await showPick()
 }
 
@@ -781,6 +793,11 @@ async function board(a: Arrival): Promise<void> {
   fixes = []
   atStatus = -1
   lastPollFailed = false
+  lastSeen = ''
+  prevSeen = ''
+  note = ''
+  stranded = false
+  menuOpen = false
   mode = 'riding'
   log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
   await show(S.waiting({
@@ -816,12 +833,18 @@ async function poll(gen: number): Promise<void> {
           // 열차 이동을 진단 기록에 남긴다. 이게 없으면 주행 중엔 req 줄만 보여 어디쯤인지 모른다.
           log('fix', me.station, S.statusWord(me.status), 'left', stopsLeft(stops, me.station), 'pace', Math.round(paceMs(stops, fixes) / 1000) + 's')
         }
-      } else {
+      } else if (!fixes.length) {
         // 고른 열차가 아직 승강장에 오지 않았다. 오는 중이다.
         misses = 0
         approach = me.station
         log('train approaching', me.station, 'at', new Date(me.at).toTimeString().slice(0, 8))
+      } else {
+        // 타고 있는데 경로 밖 역이 관측됐다. 반대 방향, 지나침, 지선 이탈 중 하나다.
+        misses = 0
+        atStatus = me.status
+        applyDeviation(deviation(leg(), me.station, lastSeen || null, me.status, trip!.to), me.station, me.at)
       }
+      if (me && me.station !== lastSeen) { prevSeen = lastSeen; lastSeen = me.station }
     } catch (e) {
       // 일시적 실패는 화면을 바꾸지 않는다. render가 추정으로 처리한다.
       // 'The string did not match the expected pattern'처럼 메시지만으로 출처를 모르는 오류가 있었다.
@@ -860,8 +883,45 @@ async function poll(gen: number): Promise<void> {
   }
 }
 
+// 이탈 판정 결과를 여정에 반영한다. 구간을 다시 써서 기존 환승·도착 흐름이 그대로 이어받게 한다.
+function applyDeviation(d: Deviation, seen: string, at: number): void {
+  log('deviation', d.kind, d.kind === 'getOff' ? `${d.reason} at ${d.at}` : '', 'seen', seen, 'prev', lastSeen || '-')
+  if (d.kind === 'on' || d.kind === 'unknown') return
+  const done = trip!.legs.slice(0, legIndex)
+  if (d.kind === 'continue') {
+    // 이 열차를 그대로 탄다. 남은 여정만 새 경로로 바꾼다.
+    trip = { from: trip!.from, to: trip!.to, legs: [...done, ...d.plan.legs] }
+    stops = leg().stops
+    fixes = [{ station: seen, at }]
+    note = '경로 변경'
+    return
+  }
+  // 내려야 한다. 현재 구간을 [지금 역, 내릴 역]으로 다시 쓰면 하차 안내와 환승 화면이 그대로 이어진다.
+  const cur = { line: leg().line, stops: d.at === seen ? [seen] : [seen, d.at] }
+  trip = { from: trip!.from, to: trip!.to, legs: [...done, cur, ...(d.plan?.legs ?? [])] }
+  stops = cur.stops
+  fixes = [{ station: seen, at }]
+  note = d.reason === 'wrongWay' ? '반대 방향' : d.reason === 'missed' ? '지나침' : '지선 이탈'
+  stranded = !d.plan && d.at !== trip.to
+}
+
+// 주행 중 탭 메뉴
+async function showMenu(): Promise<void> {
+  menuOpen = true
+  rows = [...MENU]
+  if (!(await showList([...MENU]))) { menuOpen = false; await render() }
+}
+
+async function replanHere(): Promise<void> {
+  if (!lastSeen) return showLive(() => S.notice(Date.now(), '아직 위치를 못 받았습니다', '', '탭: 메뉴'))
+  const d = deviation(leg(), lastSeen, prevSeen || null, atStatus, trip!.to)
+  if (d.kind === 'on') { note = ''; return render() }
+  applyDeviation(d, lastSeen, Date.now())
+  return render()
+}
+
 async function render(): Promise<void> {
-  if (rendering) return
+  if (rendering || menuOpen) return
   rendering = true
   try { await renderNow() } finally { rendering = false }
 }
@@ -870,10 +930,8 @@ async function renderNow(): Promise<void> {
   const now = Date.now()
   const guess = locate(stops, fixes, now)
 
-  repickable = !guess || false   // 아래에서 화면 종류에 따라 다시 정한다
   if (!guess) {
     // 아직 타지 않았다. 열차가 오는 중이거나, 열차를 못 찾았다.
-    repickable = true
     const etaSec = Math.max(0, train!.etaSec - Math.round((now - boardedAt) / 1000))
     // 세 번 연속(30초) 못 찾기 전에는 오류로 단정하지 않는다.
     // 한 번 놓친 것은 흔하다. 그때마다 오류를 띄우면 화면이 깜빡인다.
@@ -889,13 +947,13 @@ async function renderNow(): Promise<void> {
 
   const left = stopsLeft(stops, stops[guess.index])
   if (left <= 0) return arrive()
+  // 마지막 관측이 경로 밖이면(이탈 뒤 되돌아가는 중 등) 지금 역 표시는 관측 대신 마지막 관측 역을 쓴다
 
   const pace = paceMs(stops, fixes)
   const lastFix = fixes[fixes.length - 1]
   const dest = stops[stops.length - 1]
 
   if (guess.stale) {
-    repickable = true
     return show(S.lost({
       now, last: lastFix.station,
       agoSec: Math.round((now - lastFix.at) / 1000),
@@ -910,6 +968,7 @@ async function renderNow(): Promise<void> {
     return show(S.alight({
       now, stopsLeft: left, dest, next: stops[guess.index + 1],
       minutes: Math.max(1, Math.round((pace * left) / 60_000)),
+      note: note || undefined,
     }))
   }
 
@@ -919,7 +978,7 @@ async function renderNow(): Promise<void> {
     ? { station: stops[guess.index], label: '부근 (추정)' }
     : { station: stops[guess.index], label: S.statusWord(atStatus) || '통과' }
   await show(S.riding({
-    now, line: leg().line,
+    now, line: leg().line, note: note || undefined,
     at, refresh: refresh(),
     next: stops[guess.index + 1],
     legDest: dest, stopsLeft: left, paceMs: pace,
@@ -938,11 +997,15 @@ async function renderNow(): Promise<void> {
 async function arrive(): Promise<void> {
   stopPolling()
   rows = []
+  if (stranded) {
+    mode = 'arrived'
+    return showLive(() => S.notice(Date.now(), `${stops[stops.length - 1]}에서 내리세요`, '여기서는 목적지까지 경로를 찾지 못했습니다', '탭: 처음으로\n  더블탭: 종료'))
+  }
   const nextLeg = trip!.legs[legIndex + 1]
   if (nextLeg) {
     mode = 'transfer'
     return showLive(() => S.transfer({
-      now: Date.now(),
+      now: Date.now(), note: note || undefined,
       station: stops[stops.length - 1],
       from: leg().line, to: nextLeg.line,
       // 환승 뒤 첫 구간의 다음 역. 승강장 표지와 같은 기준이라 그 자리에서 확인된다.
@@ -983,11 +1046,17 @@ async function onTap(index: number): Promise<void> {
     const a = picks.find(p => p.trainNo === rows[index])
     return a ? board(a) : showPick()          // 실패 화면에서 탭하면 다시 확인
   }
-  // 안내가 적힌 화면(열차 대기, 신호 끊김, 못 찾음)에서만. 주행 화면 탭은 아무것도 하지 않는다.
+  // 주행 중 탭은 메뉴다. 도착 조회 같은 비용 있는 동작은 메뉴에서 고른 뒤에만 일어난다.
   if (mode === 'riding') {
-    if (!repickable) return
-    stopPolling()
-    return showPick(false)
+    if (menuOpen) {
+      menuOpen = false
+      const pick = rows[index]
+      if (pick === '현위치에서 재탐색') return replanHere()
+      if (pick === '열차 다시 고르기') { stopPolling(); return showPick(false) }
+      if (pick === '처음으로') return showOrigin()
+      return render()   // 계속 보기 또는 알 수 없는 행
+    }
+    return showMenu()
   }
   if (mode === 'transfer') return startLeg(legIndex + 1)
   return showOrigin()                                            // arrived

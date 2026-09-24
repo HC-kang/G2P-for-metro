@@ -133,9 +133,13 @@ export async function sendTrail(text: string): Promise<boolean> {
 let beforeRequest: (path: string) => void = () => {}
 export const setRequestGuard = (fn: (path: string) => void): void => { beforeRequest = fn }
 
+// 개발 모드 ?api=dev 이면 워커 대신 dev 서버의 모사 피드를 읽는다. 배포본은 타지 않는다.
+const DEV_API = !!import.meta.env?.DEV && typeof location !== 'undefined'
+  && new URLSearchParams(location.search).get('api') === 'dev'
+
 const get = async (path: string): Promise<unknown> => {
   beforeRequest(path)
-  const res = await fetch(`${BASE}${path}`, { headers: { 'x-metro-token': TOKEN } })
+  const res = await fetch(`${DEV_API ? '/__api' : BASE}${path}`, { headers: { 'x-metro-token': TOKEN } })
   if (res.status === 403) throw new Error('앱 설정이 서버와 맞지 않습니다')
   if (!res.ok) throw new Error(`서버 ${res.status}`)
   return res.json()

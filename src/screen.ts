@@ -129,7 +129,7 @@ export const statusWord = (status: number): string =>
 // 주행 중. 지금 어디인지와 다음 역이 함께 보여야 한다.
 // 노선 방면은 머리줄로 물러선다. 이미 탄 뒤에는 어디쯤인지가 더 급하다.
 export function riding(a: {
-  now: number; line: string
+  now: number; line: string; note?: string
   at: { station: string; label: string }
   refresh: Refresh
   next: string; legDest: string; stopsLeft: number; paceMs: number
@@ -138,7 +138,8 @@ export function riding(a: {
 }): string {
   const left = mins(a.paceMs, a.stopsLeft)
   return screen(
-    head(a.now, a.line),
+    // 경로를 바꿨거나 내려야 하면 머리줄에 짧게 밝힌다. 줄을 더 쓰지 않는다(10줄 한도).
+    head(a.now, a.note ? `${a.line} · ${a.note}` : a.line),
     '',
     `${PAD}${a.at.station} ${a.at.label}`,
     `${PAD}${refreshLine(a.refresh)}`,
@@ -159,11 +160,11 @@ export function riding(a: {
 }
 
 // 하차 임박. 화면 전체를 이 한 가지에 내준다.
-export function alight(a: { now: number; stopsLeft: number; dest: string; next: string; minutes: number }): string {
+export function alight(a: { now: number; stopsLeft: number; dest: string; next: string; minutes: number; note?: string }): string {
   const title = a.stopsLeft <= 1 ? '다 음 역 에 서  내 립 니 다' : '두  정 거 장  뒤'
   const foot = a.stopsLeft <= 1 ? `${hhmm(a.now + a.minutes * 60_000)} 도착` : `${a.next} 다음 · 약 ${a.minutes}분`
   const indent = a.stopsLeft <= 1 ? PAD + PAD : IN
-  return screen(head(a.now), '', `${indent}${title}`, '', `${IN}${PAD}${hero(a.dest, 8)}`, '', `${indent}${foot}`)
+  return screen(head(a.now, a.note ?? ''), '', `${indent}${title}`, '', `${IN}${PAD}${hero(a.dest, 8)}`, '', `${indent}${foot}`)
 }
 
 export function arrived(now: number, dest: string): string {
@@ -171,10 +172,11 @@ export function arrived(now: number, dest: string): string {
     `${PAD}탭: 처음으로`, `${PAD}더블탭: 종료`)
 }
 
-export function transfer(a: { now: number; station: string; from: string; to: string; toward: string; rest: number; minutes: number }): string {
+export function transfer(a: { now: number; station: string; from: string; to: string; toward: string; rest: number; minutes: number; note?: string }): string {
   return screen(
-    head(a.now, '환승'), '', `${IN}${hero(a.station, 6)}`, '',
-    `${PAD}${a.from} → ${a.to}`,
+    head(a.now, a.note ?? '환승'), '', `${IN}${hero(a.station, 6)}`, '',
+    // 같은 노선으로 되돌아가는 경우 '7호선 → 7호선'은 뜻이 없다. 반대 방향임을 말한다.
+    a.from === a.to ? `${PAD}${a.from} 반대 방향 열차로` : `${PAD}${a.from} → ${a.to}`,
     `${PAD}${a.toward} 방면 승강장으로`,
     ...pair(`남은 ${a.rest}정거장 ·`, `${hhmm(a.now + a.minutes * 60_000)} 도착 예정`), '',
     `${PAD}탭: 다음 열차 고르기`,
@@ -193,7 +195,7 @@ export function waiting(a: { now: number; line: string; toward: string; at: stri
     `${PAD}${a.at ? `현재 ${a.at}` : '위치 확인 중'}`,
     `${PAD}${refreshLine(a.refresh)}`,
     `${PAD}${eta}`, '',
-    `${PAD}탭: 열차 다시 고르기`,
+    `${PAD}탭: 메뉴`,
     `${PAD}더블탭: 처음으로`,
   )
 }
@@ -207,7 +209,7 @@ export function lost(a: { now: number; last: string; agoSec: number; guess: stri
     `${PAD}추정   ${hero(a.guess, 12)} 부근`, '',
     `${PAD}${a.bar}`,
     ...pair(a.dest, `${a.stopsLeft}정거장 남음`), '',
-    `${PAD}탭: 열차 다시 고르기`,
+    `${PAD}탭: 메뉴`,
   )
 }
 

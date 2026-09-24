@@ -16,6 +16,14 @@ export default defineConfig({
         res.setHeader('Cache-Control', 'no-store')
         try { res.end(readFileSync('.dev/gps.json', 'utf8')) } catch { res.statusCode = 404; res.end('{}') }
       })
+      // 모사 실시간 API. /__api/position/<노선> → .dev/position.json, /__api/arrival/<역> → .dev/arrival.json
+      // 앱은 개발 모드 ?api=dev 일 때만 워커 대신 이것을 읽는다. 열차 이탈처럼 실제로는 못 만드는 상황을 만든다.
+      server.middlewares.use('/__api', (req, res) => {
+        const kind = (req.url ?? '').split('/')[1]?.split('?')[0] ?? ''
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Cache-Control', 'no-store')
+        try { res.end(readFileSync(`.dev/${kind}.json`, 'utf8')) } catch { res.end('{}') }
+      })
       server.middlewares.use('/__log', (req, res) => {
         let body = ''
         req.on('data', c => (body += c))
