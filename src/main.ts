@@ -114,6 +114,12 @@ const parseLines = (t: string, max: number) =>
   t.split('\n').map(s => s.trim()).filter(Boolean).slice(0, max)
 
 let dests = parseLines((await bridge.getLocalStorage('destinations')) ?? '', MAX_DESTS)
+// 시뮬레이터 저장소는 비어 있다. 개발 모드에서만 URL로 도착지를 심는다.
+//   http://localhost:5173/?lat=..&lon=..&dests=홍대입구,강남
+if (import.meta.env?.DEV) {
+  const seed = (new URLSearchParams(location.search).get('dests') ?? '').split(',').map(s => s.trim()).filter(Boolean)
+  if (seed.length) dests = [...new Set([...dests, ...seed])].slice(0, MAX_DESTS)
+}
 let recents = parseLines((await bridge.getLocalStorage('recentOrigins')) ?? '', 5)
 // 출발역·도착지마다 지난번에 고른 경로를 기억한다. 늘 같은 길로 다니는 사람이 대부분이다.
 const savedQuota = ((await bridge.getLocalStorage('quota')) ?? '').split(':')
@@ -473,13 +479,26 @@ function waitFreshFix(since: number): Promise<Loc | null> {
     })
     void bridge.startAppLocationUpdates({ accuracy: AppLocationAccuracy.High, intervalMs: 1000 })
       .then(ok => { if (!ok) finish(null) })
+      .catch(e => { log('gps updates unsupported', e); finish(null) })
     setTimeout(() => finish(null), GPS_WAIT_FRESH_MS)
   })
 }
 
+// 시뮬레이터는 위치 API를 모른다(브리지 메서드 목록에 없다). 개발 모드에서만 URL로 좌표를 넣는다.
+//   http://localhost:5173/?lat=37.6350&lon=127.0645
+// 배포본은 이 코드를 타지 않는다.
+const simLocation = (): Loc | null => {
+  if (!import.meta.env?.DEV) return null
+  const q = new URLSearchParams(location.search)
+  const lat = Number(q.get('lat')), lon = Number(q.get('lon'))
+  return Number.isFinite(lat) && Number.isFinite(lon) ? { latitude: lat, longitude: lon, accuracy: 5, timestamp: Date.now() } : null
+}
+
 async function locateOnce(): Promise<Near[]> {
   const since = Date.now()
-  let loc: Loc | null = await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
+  const sim = simLocation()
+  if (sim) log('gps sim', sim.latitude, sim.longitude)
+  let loc: Loc | null = sim ?? await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
   log('gps', loc?.latitude, loc?.longitude, 'acc', loc?.accuracy, 'ts', loc?.timestamp, 'age', loc ? ageSec(loc) : null)
   gpsStale = false
   const age = loc ? ageSec(loc) : null
@@ -740,7 +759,7 @@ async function board(a: Arrival): Promise<void> {
   log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
   await show(S.waiting({
     now: Date.now(), line: leg().line, toward: a.dest || a.toward,
-    at: '확인 중', from: stops[0], etaSec: a.etaSec, refresh: refresh(),
+    at: '', from: stops[0], etaSec: a.etaSec, refresh: refresh(),
   }))
   stopPolling()
   misses = 0
@@ -831,7 +850,7 @@ async function renderNow(): Promise<void> {
     if (approach || misses < 3) {
       return show(S.waiting({
         now, line: leg().line, toward: train!.dest || train!.toward,
-        at: approach || '확인 중', from: stops[0], etaSec,
+        at: approach, from: stops[0], etaSec,
         refresh: refresh(),
       }))
     }

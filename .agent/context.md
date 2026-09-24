@@ -339,3 +339,15 @@ Cloudflare 보존 로그는 CLI로 못 본다(`wrangler tail`은 실시간뿐). 
   - 확인된 이름(`hasArrivalName`)이면 예비 이름 재시도 없음. 회귀 테스트로 못 박음(fetch 스텁으로 호출 수 검사).
   - `BURST_PER_MIN` 10 → 20. 사람은 못 넘고 폭주 루프(60+/분)는 잡힌다.
 - 교훈: 가드는 요청을 막는 것이지 화면을 막는 것이 아니다. 사람이 빠져나갈 길은 항상 열어둔다.
+
+## 2026-09-24 시뮬레이터로 직접 검증 (사용자 요청: QR 말고 에뮬레이터)
+
+- `@evenrealities/evenhub-simulator` 0.9.5. `npx evenhub-simulator --automation-port 9898 <url>`.
+  자동화 API: `GET /api/ping`, `GET /api/screenshot/glasses`(576×288 PNG, Read로 직접 본다), `GET /api/screenshot/webview`, `GET /api/console[?since_id]`, `DELETE /api/console`, `POST /api/input {action: click|double_click|up|down|long_press|…}`.
+- **시뮬레이터 브리지는 위치 API를 모른다.** `getAppLocation` → `unknown variant … expected one of getUserInfo, getGlassesInfo, setLocalStorage, getLocalStorage, createStartUpPageContainer, rebuildPageContainer, updateImageRawData, textContainerUpgrade, shutDownPageContainer, audioControl`. 그래서 개발 모드 전용 URL 파라미터를 뒀다: `?lat=&lon=`(좌표), `?dests=홍대입구,강남`(도착지 심기). 배포본은 타지 않는다.
+- 시뮬레이터 창은 사용자 화면에 뜬다. **사용자도 그 창을 누른다.** 내가 다시 띄우면 그 세션이 끊긴다. 자동화 API로만 조작하고, 다시 띄울 땐 미리 말한다.
+- 실행 중인 vite의 로그 파일을 `: >`로 비우면 앞부분이 NUL이 되어 `grep`이 못 읽는다. `grep -a`를 쓴다.
+- `createStartUpPageContainer`는 시뮬레이터에서 0을 준다(실기기는 1). 둘 다 성공이다.
+- 검증 결과(하계→홍대입구): 출발역 목록 → 도착지(정거장·시간·환승) → **방면 선택지 2개(중계/공릉)** → 열차 후보(`2분 공릉방면 온수행`) → 대기 화면 → 25초 뒤 열차 노원→중계 이동 반영, 막대 차오름·초기화. 콘솔 오류 0. **`req` 간격 25~30초, 폭주 없음.** 방향 필터 `다음역 공릉 / 온 방면 중계,중계,공릉,공릉` 정확.
+- 폭 참고: 시뮬레이터 폰트는 실기기보다 좁게 그린다(32칸 화면이 폭의 절반만 씀). 시뮬레이터로 폭 한도를 정하면 안 된다. `MAX_COLS=32`는 그대로 둔다.
+- 흠: 대기 화면 `현재 확인 중` → `위치 확인 중`으로 고쳤다.

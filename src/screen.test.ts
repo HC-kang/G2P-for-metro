@@ -147,6 +147,9 @@ test('waiting은 열차의 실제 위치와 도착 예정을 보여준다', () =
   // 도착 예정이 없으면 시간을 지어내지 않는다
   const zero = S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산', from: '노원', etaSec: 0, refresh: R })
   assert.ok(!zero.includes('도착 ·') && zero.includes('노원 도착을 기다립니다'), zero)
+  // 위치를 아직 못 받았을 때 '현재 확인 중' 같은 어색한 말이 나오면 안 된다
+  const unknown = S.waiting({ now: T, line: '7호선', toward: '장암', at: '', from: '노원', etaSec: 180, refresh: R })
+  assert.ok(unknown.includes('위치 확인 중') && !unknown.includes('현재 '), unknown)
   ok(s, 'waiting')
 })
 

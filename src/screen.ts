@@ -189,7 +189,8 @@ export function waiting(a: { now: number; line: string; toward: string; at: stri
   return screen(
     head(a.now, context(a.now, a.line, a.toward)), '',
     `${PAD}열차가 오는 중`, '',
-    `${PAD}현재 ${a.at}`,
+    // 아직 위치를 못 받았으면 '현재 확인 중'이 아니라 '위치 확인 중'이라고 쓴다.
+    `${PAD}${a.at ? `현재 ${a.at}` : '위치 확인 중'}`,
     `${PAD}${refreshLine(a.refresh)}`,
     `${PAD}${eta}`, '',
     `${PAD}탭: 열차 다시 고르기`,
