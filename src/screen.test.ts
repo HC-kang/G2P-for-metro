@@ -223,12 +223,12 @@ test('route 화면은 한도 경고를 붙일 수 있다', () => {
   ok(warned, 'route 경고')
 })
 
-// 기다리는 화면에는 반드시 스피너가 돈다. 1초마다 한 칸, 네 칸 뒤 처음으로.
-test('기다리는 화면의 스피너는 매초 다른 칸이 켜지고 확인된 글리프만 쓴다', () => {
-  const frames = [0, 1, 2, 3].map(i => S.spin(T + i * 1000))
-  assert.equal(new Set(frames).size, 4)
-  assert.equal(S.spin(T + 4000), frames[0])
-  for (const f of frames) assert.match(f, /^[●○]{4}$/)
+// 기다리는 화면에는 반드시 스피너가 돈다. 1초마다 한 칸씩 파도가 흐르고 여섯 칸 뒤 처음으로.
+test('기다리는 화면의 스피너는 매초 다른 모양이고 안경 폰트에 있는 글리프만 쓴다', () => {
+  const frames = [0, 1, 2, 3, 4, 5].map(i => S.spin(T + i * 1000))
+  assert.equal(new Set(frames).size, 6)
+  assert.equal(S.spin(T + 6000), frames[0])
+  for (const f of frames) assert.match(f, /^[▁▃▅▇]{4}$/)
   const a = S.loading(T, '노원', '7호선 열차 확인 중'), b = S.loading(T + 1000, '노원', '7호선 열차 확인 중')
   assert.ok(a.split('\n')[0].includes(frames[0]) && b.split('\n')[0].includes(frames[1]), a + '\n' + b)
   const noFix = S.waiting({ now: T, line: '7호선', toward: '장암', at: '', from: '노원', etaSec: 180, refresh: R })

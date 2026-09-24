@@ -112,9 +112,14 @@ const screen = (...lines: (string | null)[]) => lines.filter(l => l !== null).jo
 const head = (now: number, context = '') => `${PAD}현재시각 ${hhmmss(now)}${context ? `  ${context}` : ''}`
 
 // 기다리는 화면에는 반드시 스피너를 넣는다. "앱이 진짜 돌고 있나"를 보이는 것이 목적이다(사용자 원칙).
-// 실기기에서 확인된 글리프만 쓴다. ◐◓◑◒는 안경 폰트에 없어 조용히 멈춘 것처럼 보였다. 틱이 1초라 한 칸씩 돈다.
-const SPIN = ['●○○○', '○●○○', '○○●○', '○○○●']
-export const spin = (now: number): string => SPIN[Math.floor(now / 1000) % SPIN.length]
+// 안경 폰트에 있는 글리프만 쓴다(2026-09-24 실기기 확인: ▁▂▃▄▅▆▇█ ●○◌◎ ◐◑ ━─ ←→↑↓ ▶▷ ★☆♥).
+// 점자(⠋⠙…)·◓◒·░▒▓·✓✗⏳⌛⚠는 없다. 없는 글리프는 조용히 빠져 멈춘 것처럼 보인다.
+// 파도가 왼쪽으로 흐른다. 틱이 1초라 한 칸씩 움직인다. 역 진행 띠(●○◌◎)와 모양이 겹치지 않는다.
+const WAVE = ['▁', '▃', '▅', '▇', '▅', '▃']
+export const spin = (now: number): string => {
+  const t = Math.floor(now / 1000)
+  return WAVE.map((_, j) => WAVE[(t + j) % WAVE.length]).slice(0, 4).join('')
+}
 
 // 무언가를 기다리는 화면. 머리줄 오른쪽에서 스피너가 돈다.
 // 제목과 본문은 [앞, 뒤] 쌍으로 주면 넘칠 때 두 줄로 나뉜다. '공릉(서울산업대입구)에 오는 열차가…'는 한 줄에 안 들어간다.
