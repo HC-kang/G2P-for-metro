@@ -1,4 +1,4 @@
-import { lineName, arrivalName, altArrivalNames } from './stations.ts'
+import { lineName, arrivalName, altArrivalNames, hasArrivalName } from './stations.ts'
 
 // 두 API가 같은 역을 다르게 쓴다. 위치는 '군자(능동)', 역 목록은 '군자'다.
 // 비교할 때는 양쪽에서 괄호를 뗀다.
@@ -150,6 +150,9 @@ export const positions = async (line: string): Promise<TrainPos[]> =>
 export async function arrivals(station: string): Promise<Arrival[]> {
   const first = parseArrivals(await get(`/arrival/${encodeURIComponent(arrivalName(station))}`))
   if (first.length) return first
+  // 확인된 이름이 빈 결과를 주면 지금 올 열차가 없는 것이다. 예비 이름을 두 번 더 불러도 같다.
+  // 그 두 번이 탭마다 쌓여 하루 한도와 폭주 가드를 갉아먹었다.
+  if (hasArrivalName(station)) return first
   for (const alt of altArrivalNames(station)) {
     const retry = parseArrivals(await get(`/arrival/${encodeURIComponent(alt)}`))
     if (retry.length) return retry

@@ -126,14 +126,24 @@ const QUOTA_DAY = 1000
 const QUOTA_WARN = 800
 // 서울 API는 KST 자정에 초기화된다. UTC 날짜를 쓰면 오전 9시에 엉뚱하게 초기화된다.
 const today = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)
-// 1분에 이만큼 넘게 부르면 무언가 폭주한 것이다. 정상은 분당 2~4건이다.
-const BURST_PER_MIN = 10
+// 1분에 이만큼 넘게 부르면 무언가 폭주한 것이다. 정상은 분당 2~4건이고,
+// 사람이 급하게 만지작거려도 10건 안팎이다. 폭주 루프는 60건을 넘는다. 20이면 둘을 가른다.
+const BURST_PER_MIN = 20
 
 let usedDay = savedQuota[0] === today() ? savedQuota[0] : today()
 let used = savedQuota[0] === today() ? Number(savedQuota[1]) || 0 : 0
 let recentCalls: number[] = []
 
+// 하루 한도 소진. 기다려도 낫지 않는다. 화면에 말하고 멈춘다.
 class QuotaError extends Error {}
+// 분당 폭주. 몇 초만 기다리면 풀린다. 화면을 지우지 않고 기다렸다가 다시 한다.
+class BurstError extends Error {
+  waitSec: number
+  constructor(waitSec: number) {
+    super(`${waitSec}초 뒤 다시 조회할 수 있습니다`)
+    this.waitSec = waitSec
+  }
+}
 
 // 실제 요청마다 부른다(api.ts의 get 안에서). 한도와 폭주를 요청 전에 막는다.
 // 28,165건까지 올라간 적이 있다. 한도를 넘어도 계속 부르고 있었다.
@@ -145,8 +155,10 @@ function guard(path: string): void {
   recentCalls = recentCalls.filter(t => now - t < 60_000)
   const dt = lastReqAt ? ((now - lastReqAt) / 1000).toFixed(1) : '-'
   if (recentCalls.length >= BURST_PER_MIN) {
-    log('burst guard', recentCalls.length, '/min', 'path', path, 'mode', mode)
-    throw new QuotaError(`1분에 ${recentCalls.length}번 조회했습니다`)
+    // 가장 오래된 호출이 60초 창을 벗어날 때까지가 대기 시간이다
+    const waitSec = Math.max(1, Math.ceil((recentCalls[0] + 60_000 - now) / 1000))
+    log('burst guard', recentCalls.length, '/min', 'path', path, 'mode', mode, 'wait', waitSec)
+    throw new BurstError(waitSec)
   }
   if (used >= QUOTA_DAY) throw new QuotaError(`오늘 조회 한도(${QUOTA_DAY}건)를 다 썼습니다`)
   recentCalls.push(now)
@@ -669,6 +681,13 @@ async function showPick(autoBoard = true): Promise<void> {
   } catch (e) {
     log('arrivals failed', e)
     rows = []
+    if (e instanceof BurstError) {
+      // 갇히면 안 된다. 초가 줄어드는 게 보이고, 더블탭으로 언제든 나갈 수 있다.
+      const until = Date.now() + e.waitSec * 1000
+      return showLive(() => S.notice(Date.now(), '조회가 잦아 잠시 쉽니다',
+        `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인할 수 있습니다`,
+        '탭: 다시 확인\n  더블탭: 처음으로'))
+    }
     if (e instanceof QuotaError) return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · KST 자정에 초기화`, '탭: 다시 확인'))
     if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, 'KST 자정에 초기화됩니다', '탭: 다시 확인'))
     return showLive(() => S.notice(Date.now(), '도착 정보를 받지 못했습니다', String(e), '탭: 다시 확인'))
@@ -759,6 +778,15 @@ async function poll(gen: number): Promise<void> {
       // 'The string did not match the expected pattern'처럼 메시지만으로 출처를 모르는 오류가 있었다.
       const st = e instanceof Error && e.stack ? ' @ ' + e.stack.split('\n').slice(0, 3).join(' | ') : ''
       log('poll failed', e instanceof Error ? e.name : typeof e, String(e) + st)
+      if (e instanceof BurstError) {
+        // 실패가 아니다. 화면은 그대로 두고 풀리는 시각에 맞춰 다음 폴링을 잡는다.
+        if (gen === pollGen && mode === 'riding') {
+          pollWait = e.waitSec * 1000
+          nextPollAt = Date.now() + pollWait
+          pollTimer = setTimeout(() => poll(gen), pollWait)
+        }
+        return
+      }
       lastPollFailed = true
       if (e instanceof QuotaError) {
         stopPolling()

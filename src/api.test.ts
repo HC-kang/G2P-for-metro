@@ -84,3 +84,28 @@ test('키 오류도 그대로 말한다', () => {
   assert.throws(() => parsePositions({ code: 'ERROR-338', message: '해당 인증키로는 실시간 서비스를 사용할 수 없습니다.' }),
     (e: Error) => e instanceof ApiError && e.message.includes('실시간'))
 })
+
+test('arrivals는 확인된 이름이면 빈 결과에 예비 이름을 다시 부르지 않는다', async () => {
+  // 탭마다 3건씩 나가 하루 한도와 폭주 가드를 갉아먹던 동작이다.
+  const { arrivals } = await import('./api.ts')
+  const { hasArrivalName } = await import('./stations.ts')
+  const calls: string[] = []
+  const realFetch = globalThis.fetch
+  globalThis.fetch = (async (url: string) => {
+    calls.push(String(url))
+    return { ok: true, status: 200, json: async () => ({ realtimeArrivalList: [] }) }
+  }) as unknown as typeof fetch
+  try {
+    assert.equal(hasArrivalName('하계'), true)
+    await arrivals('하계')
+    assert.equal(calls.length, 1, `확인된 역은 1번: ${calls.join(', ')}`)
+
+    calls.length = 0
+    assert.equal(hasArrivalName('아차산'), false)
+    await arrivals('아차산')
+    assert.ok(calls.length >= 2, `미확인 역은 예비 이름까지: ${calls.join(', ')}`)
+    assert.ok(calls.some(c => c.includes(encodeURIComponent('아차산(어린이대공원후문)'))), calls.join(', '))
+  } finally {
+    globalThis.fetch = realFetch
+  }
+})
