@@ -178,8 +178,10 @@ export function transfer(a: { now: number; station: string; from: string; to: st
     // 같은 노선으로 되돌아가는 경우 '7호선 → 7호선'은 뜻이 없다. 반대 방향임을 말한다.
     a.from === a.to ? `${PAD}${a.from} 반대 방향 열차로` : `${PAD}${a.from} → ${a.to}`,
     `${PAD}${a.toward} 방면 승강장으로`,
-    ...pair(`남은 ${a.rest}정거장 ·`, `${hhmm(a.now + a.minutes * 60_000)} 도착 예정`), '',
-    `${PAD}탭: 다음 열차 고르기`,
+    ...pair(`남은 ${a.rest}정거장 ·`, `${hhmm(a.now + a.minutes * 60_000)} 도착 예정`),
+    // 사용자에게 시키지 않는다. 타던 열차가 떠나면 앱이 다음 열차를 찾는다. 탭은 지름길일 뿐이다.
+    `${PAD}자동으로 다음 열차를 찾습니다`,
+    `${PAD}탭: 지금 바로`,
   )
 }
 

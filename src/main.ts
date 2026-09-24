@@ -121,6 +121,8 @@ if (import.meta.env?.DEV) {
   if (seed.length) dests = [...new Set([...dests, ...seed])].slice(0, MAX_DESTS)
 }
 let recents = parseLines((await bridge.getLocalStorage('recentOrigins')) ?? '', 5)
+// 마지막으로 도착한 역. 위치가 없거나 묵었을 때 가장 그럴듯한 출발역이다.
+let lastArrived = (await bridge.getLocalStorage('lastArrived')) ?? ''
 // 출발역·도착지마다 지난번에 고른 경로를 기억한다. 늘 같은 길로 다니는 사람이 대부분이다.
 const savedQuota = ((await bridge.getLocalStorage('quota')) ?? '').split(':')
 const prefs = new Map(((await bridge.getLocalStorage('prefs')) ?? '').split('\n')
@@ -451,14 +453,12 @@ function stopPolling(): void {
 
 // ---------- 출발역 ----------
 
-let gpsRough = false   // 오차가 커서 목록 순서를 믿기 어려운 상태
-let gpsStale = false   // 호스트가 준 위치가 오래된 것이라 실제 위치와 다를 수 있는 상태
-
 // getAppLocation은 호스트의 마지막 위치를 그대로 돌려준다.
 // 실측: 한 세션의 GPS 읽기 10번이 소수점 5자리까지 같은 좌표였다. 주행을 했는데도.
-// timestamp로 묵은 것을 가려내고, 묵었으면 갱신을 켜 새 측위를 밀어받는다.
+// 그래서 묵은 위치라도 일단 최선의 추정으로 목록을 띄우고, 새 측위를 계속 받아 조용히 고쳐 나간다.
+// 사용자에게 "직접 고르세요"라고 시키지 않는다. 앱이 할 수 있는 일은 앱이 한다.
 const GPS_FRESH_MS = 30_000
-const GPS_WAIT_FRESH_MS = 8_000
+const ORIGIN_WATCH_MS = 180_000
 
 type Loc = { latitude: number; longitude: number; accuracy?: number; timestamp?: number }
 
@@ -469,41 +469,9 @@ const ageSec = (l: Loc): number | null => {
   const t = tsMs(l.timestamp)
   return t == null ? null : Math.round((Date.now() - t) / 1000)
 }
-
-// 갱신을 켜고, 요청한 시각 이후에 찍힌 좌표가 오면 그것을 쓴다. 안 오면 null.
-async function waitFreshFix(since: number): Promise<Loc | null> {
-  if (simFeed) {
-    // 모사 피드는 밀어주지 않으니 0.5초마다 다시 읽는다. 브리지 경로와 같은 판정이다.
-    const t0 = Date.now()
-    while (Date.now() - t0 < GPS_WAIT_FRESH_MS) {
-      const l = await simLocation()
-      const t = l ? tsMs(l.timestamp) : null
-      if (l && t != null && t >= since) return l
-      await new Promise(r => setTimeout(r, 500))
-    }
-    return null
-  }
-  return new Promise(resolve => {
-    let done = false
-    const finish = (l: Loc | null) => {
-      if (done) return
-      done = true
-      off()
-      void bridge.stopAppLocationUpdates()
-      resolve(l)
-    }
-    const off = bridge.onAppLocationChanged(l => {
-      const t = tsMs(l.timestamp)
-      log('gps push', l.latitude, l.longitude, 'acc', l.accuracy, 'ts', l.timestamp, 'age', ageSec(l))
-      // timestamp가 없으면 밀어준 것 자체를 새 측위로 본다
-      if (t == null || t >= since) finish(l)
-    })
-    void bridge.startAppLocationUpdates({ accuracy: AppLocationAccuracy.High, intervalMs: 1000 })
-      .then(ok => { if (!ok) finish(null) })
-      .catch(e => { log('gps updates unsupported', e); finish(null) })
-    setTimeout(() => finish(null), GPS_WAIT_FRESH_MS)
-  })
-}
+// 묵었거나(30초 초과) 오차가 크면(1km 초과) 목록 순서를 다 믿지 않는다. 버리지는 않는다.
+const uncertain = (l: Loc): boolean =>
+  ((ageSec(l) ?? 0) * 1000 > GPS_FRESH_MS) || ((l.accuracy ?? 0) > MAX_ACCURACY_M)
 
 // 시뮬레이터는 위치 API를 모른다(브리지 메서드 목록에 없다). 개발 모드에서만 모사한다.
 //   ?lat=37.6350&lon=127.0645   고정 좌표
@@ -530,72 +498,67 @@ async function simLocation(): Promise<Loc | null> {
   return Number.isFinite(lat) && Number.isFinite(lon) ? { latitude: lat, longitude: lon, accuracy: 5, timestamp: Date.now() } : null
 }
 
-async function locateOnce(): Promise<Near[]> {
-  const since = Date.now()
-  const sim = await simLocation()
-  if (sim) log('gps sim', sim.latitude, sim.longitude, 'ts', sim.timestamp)
-  let loc: Loc | null = sim ?? await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
-  log('gps', loc?.latitude, loc?.longitude, 'acc', loc?.accuracy, 'ts', loc?.timestamp, 'age', loc ? ageSec(loc) : null)
-  gpsStale = false
-  const age = loc ? ageSec(loc) : null
-  if (loc && age != null && age * 1000 > GPS_FRESH_MS) {
-    // 묵은 위치다. 새 측위를 기다린다. 안 오면 묵은 것을 쓰되 그렇다고 말한다.
-    const fresh = await waitFreshFix(since)
-    if (fresh) loc = fresh
-    else gpsStale = true
-    log('gps fresh', fresh ? 'yes' : 'no', 'stale age', age)
-  }
-  if (!loc || !Number.isFinite(loc.latitude)) return []
-  // 오차가 커도 버리지 않는다. 실내나 지하에서는 1km를 넘는 것이 흔하다.
-  // 버리면 사용자에게 아무것도 남지 않는다. 후보를 더 주고 불확실하다고 말한다.
-  gpsRough = (loc.accuracy ?? 0) > MAX_ACCURACY_M
-  return nearest(loc.latitude, loc.longitude, COORDS, gpsRough || gpsStale ? 12 : 8)
-}
-
+// 지금 당장 받을 수 있는 위치. 기다리지 않는다. 없으면 null.
 // 첫 호출이 null을 주는 것을 실기기에서 봤다. 한 번 더 부른다.
-async function nearbyStations(): Promise<Near[]> {
+async function quickFix(): Promise<Loc | null> {
+  const sim = await simLocation()
+  if (sim) return sim
   for (let i = 0; i < 2; i++) {
     try {
-      const near = await locateOnce()
-      if (near.length) return near
+      const l = await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
+      if (l && Number.isFinite(l.latitude)) return l
     } catch (e) {
       log('gps failed', i, e)
     }
   }
-  return []
+  return null
 }
 
-async function showOrigin(): Promise<void> {
-  mode = 'origin'
-  trip = null
-  train = null
-  stopPolling()
-  await showLive(() => S.notice(Date.now(), '출발역을 찾는 중', '', '위치를 확인하고 있습니다'))
-  const near = await nearbyStations()
-  const names = [...near.map(n => n.name), ...recents.filter(r => !near.some(n => n.name === r))]
-  if (!names.length) {
-    rows = []
-    return showLive(() => S.notice(Date.now(), '출발역을 찾지 못했습니다',
-      '위치 권한을 켜거나, 폰에서 자주 가는 곳을 넣으세요', '탭: 다시 시도\n  더블탭: 종료'))
+// 출발역 후보. 위치가 있으면 가까운 순, 불확실하면 지난 도착역·최근 출발역을 앞으로 당긴다.
+// 위치가 없으면 지난 도착역 → 최근 출발역 → 자주 가는 곳. 셋 다 없을 때만 빈 배열이다.
+function originCandidates(fix: Loc | null): { name: string; label: string }[] {
+  const out: { name: string; label: string }[] = []
+  const seen = new Set<string>()
+  const push = (name: string, label: string) => {
+    if (name && !seen.has(name)) { seen.add(name); out.push({ name, label }) }
   }
-  const meters = new Map(near.map(n => [n.name, n.meters]))
-  rows = names
-  const items = S.rows(names, n => {
-    const m = meters.get(n)
-    return m === undefined ? `${lineLabel(n)}  최근` : `${lineLabel(n)}  ${m}m`
-  })
-  // 안내행은 고를 수 없어야 한다. rows의 빈 문자열이 onTap을 다시 시도로 보낸다.
-  if (!near.length) {
-    items.unshift('위치를 찾지 못했습니다 · 최근 출발역')
-    rows = ['', ...names]
-  } else if (gpsStale) {
-    // 호스트가 마지막 위치만 주고 새 측위가 안 왔다. 지금 자리와 다를 수 있다.
-    items.unshift('위치가 오래됐습니다 · 직접 고르세요')
-    rows = ['', ...names]
-  } else if (gpsRough) {
-    items.unshift('위치가 정확하지 않습니다 · 직접 고르세요')
-    rows = ['', ...names]
+  if (fix) {
+    const unc = uncertain(fix)
+    const near = nearest(fix.latitude, fix.longitude, COORDS, unc ? 12 : 8)
+    // 묵은 위치 근처에 아는 역이 있으면 그게 정답일 가능성이 크다.
+    const score = (n: Near) =>
+      n.meters - (unc && n.name === lastArrived ? 800 : 0) - (unc && recents.includes(n.name) ? 400 : 0)
+    for (const n of [...near].sort((a, b) => score(a) - score(b))) {
+      push(n.name, `${lineLabel(n.name)}  ${unc ? '≈' : ''}${n.meters}m`)
+    }
   }
+  push(lastArrived, `${lineLabel(lastArrived)}  지난 도착`)
+  for (const r of recents) push(r, `${lineLabel(r)}  최근`)
+  if (!out.length) for (const d of dests) push(d, `${lineLabel(d)}  자주 가는 곳`)
+  return out
+}
+
+let originGen = 0
+let originTop = ''
+let originWatch: ReturnType<typeof setInterval> | null = null
+let originUnsub: (() => void) | null = null
+
+function stopOriginWatch(): void {
+  if (originWatch) clearInterval(originWatch)
+  originWatch = null
+  if (originUnsub) {
+    originUnsub()
+    originUnsub = null
+    Promise.resolve(bridge.stopAppLocationUpdates()).catch(() => {})
+  }
+}
+
+async function renderOrigin(fix: Loc | null): Promise<boolean> {
+  const cands = originCandidates(fix)
+  if (!cands.length) return false
+  rows = cands.map(c => c.name)
+  originTop = rows[0]
+  const items = S.rows(rows, n => cands.find(c => c.name === n)!.label)
   // 한도가 가까우면 떠나기 전에 알린다. 도중에 끊기는 것보다 낫다.
   if (used >= QUOTA_WARN) {
     items.unshift(`오늘 조회 ${used}/${QUOTA_DAY} · KST 자정에 초기화`)
@@ -603,8 +566,58 @@ async function showOrigin(): Promise<void> {
   }
   if (!(await showList(items))) {
     rows = []
-    await showLive(() => S.notice(Date.now(), '목록을 표시하지 못했습니다', '', '탭: 다시 시도\n  더블탭: 종료'))
+    await showLive(() => S.notice(Date.now(), '목록을 표시하지 못했습니다', '다시 그리는 중입니다', '더블탭: 종료'))
   }
+  return true
+}
+
+// 사용자가 고르기 전까지 새 측위를 받아 목록을 고쳐 나간다. 맨 위 역이 바뀔 때만 다시 그린다.
+function startOriginWatch(gen: number, since: number): void {
+  const onFix = async (l: Loc) => {
+    if (gen !== originGen || mode !== 'origin' || busy || menuOpen) return
+    // 이 화면에 오래 머물면 GPS를 끈다. 배터리를 먹으면서 아무도 안 보는 목록을 고치는 일은 없다.
+    if (Date.now() - since > ORIGIN_WATCH_MS) return stopOriginWatch()
+    const t = tsMs(l.timestamp)
+    if (t != null && t < since) return          // 요청 전에 찍힌 묵은 값이다
+    log('gps push', l.latitude, l.longitude, 'acc', l.accuracy, 'ts', l.timestamp, 'age', ageSec(l))
+    const cands = originCandidates(l)
+    if (cands.length && (cands[0].name !== originTop || !rows.length)) {
+      log('gps refine', originTop || '-', '->', cands[0].name)
+      await renderOrigin(l)
+    }
+  }
+  if (simFeed) {
+    originWatch = setInterval(() => { void simLocation().then(l => { if (l) void onFix(l) }) }, 3000)
+  } else {
+    originUnsub = bridge.onAppLocationChanged(l => { void onFix(l) })
+    Promise.resolve(bridge.startAppLocationUpdates({ accuracy: AppLocationAccuracy.High, intervalMs: 3000 }))
+      .catch(e => log('gps updates unsupported', e))
+  }
+}
+
+async function showOrigin(): Promise<void> {
+  mode = 'origin'
+  trip = null
+  train = null
+  menuOpen = false
+  stopPolling()
+  stopTransferWatch()
+  stopOriginWatch()
+  const gen = ++originGen
+  const since = Date.now()
+  const quick = await quickFix()
+  log('gps', quick?.latitude, quick?.longitude, 'acc', quick?.accuracy, 'ts', quick?.timestamp, 'age', quick ? ageSec(quick) : null)
+  if (gen !== originGen) return
+  // 일단 지금 아는 것으로 띄운다. 묵은 위치든 지난 도착역이든, 없는 것보다 낫다.
+  const shown = await renderOrigin(quick)
+  if (!shown) {
+    rows = []
+    // 위치도, 이력도, 자주 가는 곳도 없다. 이때만 사용자에게 말한다.
+    await showLive(() => S.notice(Date.now(), '출발역을 정하는 중', '위치를 받고 있습니다',
+      dests.length ? '' : '자주 가는 곳을 넣어두면 위치 없이도 시작합니다'))
+  }
+  // 위치가 없거나 묵었으면 새 측위를 계속 받아 고쳐 나간다.
+  if (!quick || uncertain(quick)) startOriginWatch(gen, since)
 }
 
 // ---------- 도착지 ----------
@@ -716,7 +729,9 @@ async function startTrip(picked: Plan): Promise<void> {
 // ---------- 탈 열차 ----------
 
 async function startLeg(i: number): Promise<void> {
+  stopTransferWatch()
   legIndex = i
+  autoRepicks = 0
   stops = leg().stops
   train = null
   approach = ''
@@ -729,6 +744,7 @@ async function startLeg(i: number): Promise<void> {
 // 켜 둔 채로 다시 고르면 같은 열차를 또 태워서 아무 일도 없는 것처럼 보인다.
 async function showPick(autoBoard = true): Promise<void> {
   mode = 'pick'
+  pickGen += 1
   const from = stops[0]
   // 조회에 시간이 걸린다. 탭이 먹혔다는 것을 먼저 보여준다.
   await showLive(() => S.notice(Date.now(), `${from}`, `${leg().line} 도착 열차를 확인합니다`, '잠시만 기다리세요'))
@@ -739,15 +755,20 @@ async function showPick(autoBoard = true): Promise<void> {
     log('arrivals failed', e)
     rows = []
     if (e instanceof BurstError) {
-      // 갇히면 안 된다. 초가 줄어드는 게 보이고, 더블탭으로 언제든 나갈 수 있다.
+      // 시간이 되면 앱이 알아서 다시 조회한다. 초가 줄어드는 게 보이고, 더블탭으로 언제든 나갈 수 있다.
       const until = Date.now() + e.waitSec * 1000
+      retryPick(e.waitSec + 1, 'burst')
       return showLive(() => S.notice(Date.now(), '조회가 잦아 잠시 쉽니다',
-        `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인할 수 있습니다`,
-        '탭: 다시 확인\n  더블탭: 처음으로'))
+        `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 자동으로 다시 확인`, '더블탭: 처음으로'))
     }
-    if (e instanceof QuotaError) return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · KST 자정에 초기화`, '탭: 다시 확인'))
-    if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, 'KST 자정에 초기화됩니다', '탭: 다시 확인'))
-    return showLive(() => S.notice(Date.now(), '도착 정보를 받지 못했습니다', String(e), '탭: 다시 확인'))
+    // 한도 소진은 기다려도 낫지 않는다. 자정까지는 앱이 할 수 있는 게 없다.
+    if (e instanceof QuotaError) return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · KST 자정에 초기화`, '더블탭: 처음으로'))
+    if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, 'KST 자정에 초기화됩니다', '더블탭: 처음으로'))
+    const wait = FAST_POLL ? 5 : 20
+    const until = Date.now() + wait * 1000
+    retryPick(wait, 'error')
+    return showLive(() => S.notice(Date.now(), '도착 정보를 받지 못했습니다',
+      `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 자동으로 다시 확인`, '탭: 지금 확인\n  더블탭: 처음으로'))
   }
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
   // 방향은 "…방면" 역이 다음 역과 같은지로 가른다.
@@ -762,7 +783,12 @@ async function showPick(autoBoard = true): Promise<void> {
 
   if (!candidates.length) {
     rows = []
-    return showLive(() => S.notice(Date.now(), `${from}에 오는 열차가 없습니다`, `${toward()} 방면 도착 정보가 비어 있습니다`, '탭: 다시 확인\n  더블탭: 처음으로'))
+    // 앱이 알아서 다시 본다. 초읽기가 줄어드는 게 보인다.
+    const wait = FAST_POLL ? 8 : 30
+    const until = Date.now() + wait * 1000
+    retryPick(wait, 'no candidates')
+    return showLive(() => S.notice(Date.now(), `${from}에 오는 열차가 아직 없습니다`,
+      `${toward()} 방면 · ${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`, '탭: 지금 확인\n  더블탭: 처음으로'))
   }
   // 후보가 하나뿐이어도 "다시 고르기"로 온 경우에는 목록을 보여준다.
   // 자동으로 같은 열차를 다시 태우면 탭이 먹히지 않은 것처럼 보인다.
@@ -780,11 +806,20 @@ async function showPick(autoBoard = true): Promise<void> {
   )
   if (!(await showList(items))) {
     rows = []
-    await showLive(() => S.notice(Date.now(), '열차 목록을 표시하지 못했습니다', '', '탭: 다시 확인'))
+    retryPick(FAST_POLL ? 5 : 15, 'list failed')
+    await showLive(() => S.notice(Date.now(), '열차 목록을 표시하지 못했습니다', '잠시 뒤 다시 그립니다', '더블탭: 처음으로'))
   }
 }
 
 let picks: Arrival[] = []
+// 자동 재시도. 사용자가 탭하거나 다른 흐름이 시작되면 세대가 바뀌어 옛 타이머는 아무것도 하지 않는다.
+let pickGen = 0
+let autoRepicks = 0
+function retryPick(sec: number, why: string): void {
+  const g = pickGen
+  log('pick retry in', sec + 's', why)
+  setTimeout(() => { if (g === pickGen && mode === 'pick' && !busy) void showPick(true) }, sec * 1000)
+}
 
 async function board(a: Arrival): Promise<void> {
   train = a
@@ -823,6 +858,13 @@ async function poll(gen: number): Promise<void> {
       if (!me) {
         misses += 1
         log('train not in feed', train!.trainNo, 'misses', misses)
+        // 타기 전에 세 번 연속 없으면 열차번호가 바뀌었거나 잘못 잡은 것이다. 앱이 다시 고른다(두 번까지).
+        if (misses >= 3 && autoRepicks < 2 && !fixes.length) {
+          autoRepicks += 1
+          log('auto repick', autoRepicks)
+          stopPolling()
+          return showPick(true)
+        }
       } else if (stops.includes(me.station)) {
         misses = 0
         approach = ''
@@ -1004,6 +1046,7 @@ async function arrive(): Promise<void> {
   const nextLeg = trip!.legs[legIndex + 1]
   if (nextLeg) {
     mode = 'transfer'
+    startTransferWatch()
     return showLive(() => S.transfer({
       now: Date.now(), note: note || undefined,
       station: stops[stops.length - 1],
@@ -1015,7 +1058,39 @@ async function arrive(): Promise<void> {
     }))
   }
   mode = 'arrived'
-  await showLive(() => S.arrived(Date.now(), stops[stops.length - 1]))
+  lastArrived = stops[stops.length - 1]
+  void bridge.setLocalStorage('lastArrived', lastArrived)
+  await showLive(() => S.arrived(Date.now(), lastArrived))
+}
+
+// 환승 화면에서 타던 열차가 떠나면 다음 열차를 자동으로 찾는다. 탭은 "지금 바로"다.
+// 안 내리고 계속 탄 경우는 잡지 못한다. 그때는 메뉴의 재탐색이 있다.
+let transferPoll: ReturnType<typeof setInterval> | null = null
+let transferTimer: ReturnType<typeof setTimeout> | null = null
+function stopTransferWatch(): void {
+  if (transferPoll) clearInterval(transferPoll)
+  if (transferTimer) clearTimeout(transferTimer)
+  transferPoll = transferTimer = null
+}
+function startTransferWatch(): void {
+  stopTransferWatch()
+  const at = stops[stops.length - 1]
+  const tn = train?.trainNo
+  const ln = leg().line
+  const idx = legIndex
+  const advance = (why: string) => {
+    stopTransferWatch()
+    if (mode === 'transfer' && legIndex === idx && !busy) { log('transfer auto', why); void startLeg(idx + 1) }
+  }
+  transferTimer = setTimeout(() => advance('timeout'), FAST_POLL ? 20_000 : 90_000)
+  if (!tn) return
+  transferPoll = setInterval(() => {
+    if (mode !== 'transfer') return stopTransferWatch()
+    positions(ln).then(list => {
+      const me = list.find(t => t.trainNo === tn)
+      if (me && (me.station !== at || me.status === 2)) advance(`old train ${me.station} ${S.statusWord(me.status)}`)
+    }).catch(e => log('transfer watch failed', e))
+  }, FAST_POLL ? 5_000 : 20_000)
 }
 
 // ---------- 이벤트 ----------
@@ -1029,7 +1104,8 @@ function eventTypeOf(e?: { eventType?: OsEventTypeList }): OsEventTypeList | nul
 async function onTap(index: number): Promise<void> {
   if (mode === 'origin') {
     const pick = rows[index]
-    if (!pick) return showOrigin()   // 자 화면과 실패 화면은 rows가 비어 있다
+    if (!pick) return showOrigin()   // 안내행이나 실패 화면은 rows가 비어 있다
+    stopOriginWatch()
     origin = pick
     return showDest()
   }
@@ -1066,6 +1142,8 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
   const type = eventTypeOf(event.listEvent) ?? eventTypeOf(event.textEvent) ?? eventTypeOf(event.sysEvent)
   if (type === OsEventTypeList.SYSTEM_EXIT_EVENT || type === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
     stopPolling()
+    stopOriginWatch()
+    stopTransferWatch()
     clearInterval(ticker)
     return unsubscribe()
   }

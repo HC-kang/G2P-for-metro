@@ -137,6 +137,8 @@ test('transfer는 환승 뒤 남은 여정을 보여준다', () => {
   assert.ok(s.includes('3호선') && s.includes('경복궁'))
   assert.ok(s.includes('남은 3정거장') && s.includes('18:52 도착 예정'), s)
   assert.ok(s.includes('방면 승강장으로'), s)
+  // 사용자에게 다음 열차를 고르라고 시키지 않는다. 앱이 찾는다고 말한다.
+  assert.ok(s.includes('자동으로 다음 열차를 찾습니다') && !s.includes('다음 열차 고르기'), s)
   ok(s, 'transfer')
 })
 
