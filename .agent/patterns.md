@@ -114,3 +114,4 @@ dev server 로그(`/__log`)는 같은 Wi-Fi에서만 받으므로 지하철에 �
 - 2026-09-26 기준 Hub에 올라간 마지막 빌드는 v0.4.0이다. 0.4.1은 올리지 않았다.
 - 갱신: 사용자가 Orca 내장 브라우저에 Even Hub를 로그인한 채 열어 두면 `orca tab list --worktree all --json`으로 탭을 찾고 `--page <browserPageId>`로 snapshot/click/upload를 한다. 업로드 입력은 `orca upload --element <ref> --files <path>`. 올린 뒤 Build details의 크기를 `out.ehpk`와 대조한다.
 - 2026-09-26: v0.4.2가 Hub에 올라갔다(78.7 KB, out.ehpk 78,705바이트와 일치).
+- 갱신(0.4.3): Even Hub의 파일 입력은 숨겨져 있어 스냅샷 ref가 없다. `orca exec --page <id> --command "upload input[type=file] <절대경로>"`로 넣는다. 그러면 Create build 창에 버전·크기가 뜨고, Change log를 채운 뒤 `Add build`를 누른다. 목록에 새 버전이 뜨는지 확인한다.

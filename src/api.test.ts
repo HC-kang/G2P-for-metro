@@ -129,3 +129,25 @@ test('기기 로그는 모아서 보내고 분당 한도를 넘으면 버린 줄
   b.flush()
   assert.equal(sent.at(-1), 'next')
 })
+
+test('보내지 못한 로그 묶음은 되돌렸다가 다음에 보낸다', async () => {
+  const { batcher } = await import('./api.ts')
+  const sent: string[] = []
+  let online = false
+  const b = batcher(s => { sent.push(s); return Promise.resolve(online) }, { schedule: () => undefined, keepChars: 40 })
+  b.push('터널 안 1'); b.flush()
+  await Promise.resolve(); await Promise.resolve()
+  b.push('터널 안 2')
+  online = true
+  b.flush()
+  await Promise.resolve()
+  assert.equal(sent.at(-1), '터널 안 1\n터널 안 2', '실패한 묶음이 앞에, 새 줄이 뒤에 온다')
+  // 되돌린 것이 한도를 넘으면 오래된 것부터 버리고 버렸다고 남긴다
+  online = false
+  for (let i = 0; i < 5; i++) { b.push(`줄 ${i} ${'x'.repeat(10)}`); b.flush(); await Promise.resolve(); await Promise.resolve() }
+  online = true
+  b.flush(); await Promise.resolve()
+  assert.ok(sent.at(-1)!.startsWith('(전송 실패로 로그'), sent.at(-1))
+  assert.ok(!sent.at(-1)!.includes('줄 0'), '오래된 줄부터 버린다')
+  assert.ok(sent.at(-1)!.includes('줄 4'), sent.at(-1))
+})

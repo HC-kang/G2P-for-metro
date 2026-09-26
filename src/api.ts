@@ -104,19 +104,30 @@ export function parseArrivals(body: unknown): Arrival[] {
 // 기기 로그를 모아 보낸다. 한 줄마다 fetch를 보냈더니 폴링 폭증 때 초당 수십 건이 나가
 // 앱을 더 무겁게 만들었다(09-25 실측). 10초마다 한 번 보내고, 분당 줄 수를 넘으면 버린 줄 수만 남긴다.
 // schedule은 테스트에서 바꿔 끼운다. 한 번짜리 타이머가 두 번 불려도 두 번째는 빈 버퍼라 아무것도 보내지 않는다.
+// send가 false로 끝나면(전송 실패) 그 묶음을 버퍼 앞에 되돌린다. 지하 구간에서 끊긴 동안의 기록이
+// 가장 쓸모 있다. 되돌린 것이 keepChars를 넘으면 오래된 것부터 버리고 버린 사실을 남긴다.
 export function batcher(
-  send: (text: string) => void,
-  { now = Date.now, everyMs = 10_000, perMin = 200, maxChars = 7000,
+  send: (text: string) => void | Promise<boolean>,
+  { now = Date.now, everyMs = 10_000, perMin = 200, maxChars = 7000, keepChars = 20_000,
     schedule = (fn: () => void, ms: number): unknown => setTimeout(fn, ms) } = {},
 ) {
-  let buf: string[] = [], size = 0, dropped = 0, windowAt = -Infinity, inWindow = 0, pending = false
-  const flush = (): void => {
+  let buf: string[] = [], size = 0, dropped = 0, windowAt = -Infinity, inWindow = 0, pending = false, lost = 0
+  const later = () => { if (!pending) { pending = true; schedule(flush, everyMs) } }
+  // 줄 단위로 되돌린다. 한 덩어리로 넣으면 한도를 넘어도 버릴 단위가 없어 끝없이 커졌다.
+  const requeue = (text: string): void => {
+    const lines = text.split('\n')
+    buf.unshift(...lines); size += text.length + 1
+    while (size > keepChars && buf.length) { size -= buf.shift()!.length + 1; lost++ }
+    later()
+  }
+  function flush(): void {
     pending = false
+    if (lost) { buf.unshift(`(전송 실패로 로그 ${lost}줄 버림)`); lost = 0 }
     if (dropped) { buf.push(`(로그 ${dropped}줄 버림: 분당 ${perMin}줄 초과)`); dropped = 0 }
     if (!buf.length) return
     const text = buf.join('\n')
     buf = []; size = 0
-    send(text)
+    void Promise.resolve(send(text)).then(ok => { if (ok === false) requeue(text) })
   }
   const push = (line: string): void => {
     const t = now()
@@ -125,38 +136,34 @@ export function batcher(
     const l = line.slice(0, 500)
     buf.push(l); size += l.length + 1
     if (size >= maxChars) return flush()
-    if (!pending) { pending = true; schedule(flush, everyMs) }
+    later()
   }
   return { push, flush }
 }
 
-// dev 서버는 같은 Wi-Fi에서만 받으므로 지하철에서는 끊긴다. 워커로 보내면 `npx wrangler tail`로 어디서든 본다.
-const logs = BASE
-  ? batcher(text => void fetch(`${BASE}/log`, {
-      method: 'POST',
-      headers: { 'x-metro-token': TOKEN, 'Content-Type': 'text/plain' },
-      body: text,
-      keepalive: true,
-    }).catch(() => {}))
-  : null
+// 개발 기간 자동 보고. 빌드 설정 VITE_LOG_REPORT=1일 때만 켜진다. 없으면 꺼진다(공개 빌드에 실수로 들어가지 않게).
+// 워커가 묶음을 D1에 저장한다. 사용자가 버튼을 누르지 않아도, 내 Mac이 꺼져 있어도 기록이 남는다.
+// 로그에는 GPS 좌표가 들어간다. 폰 설정 화면에 자동 보고 중임을 표시한다.
+export const REPORTING = !!BASE && import.meta.env?.VITE_LOG_REPORT === '1'
+// 실행마다 다른 이름. 여러 번 켜고 끈 기록을 가를 수 있다. 개발 서버에서 돈 것은 dev-로 시작한다.
+export const SESSION = `${import.meta.env?.DEV ? 'dev-' : ''}${import.meta.env?.VITE_APP_VERSION ?? ''}-${Math.random().toString(36).slice(2, 8)}`
+const post = (text: string, kind: 'live' | 'trail', keepalive: boolean): Promise<boolean> =>
+  fetch(`${BASE}/log`, {
+    method: 'POST',
+    headers: { 'x-metro-token': TOKEN, 'Content-Type': 'text/plain', 'x-metro-kind': kind, 'x-metro-session': SESSION },
+    body: text,
+    keepalive,
+  }).then(r => r.ok, () => false)
+const logs = REPORTING ? batcher(text => post(text, 'live', true)) : null
 export const remoteLog = (msg: string): void => logs?.push(msg)
 // 화면이 꺼지거나 앱이 끝날 때 남은 것을 바로 보낸다.
 export const flushLog = (): void => logs?.flush()
 
 // 기록 묶음을 보낸다. 성공 여부를 돌려주므로 화면이 사실대로 말할 수 있다.
 export async function sendTrail(text: string): Promise<boolean> {
+  // 자동 보고와 상관없이 사용자가 누르면 보낸다. 워커가 D1에 kind=trail로 저장한다.
   if (!BASE) return false
-  try {
-    // x-metro-kind: trail 이면 워커가 KV에 보관한다. tail이 끊겨 있어도 나중에 꺼내 볼 수 있다.
-    const res = await fetch(`${BASE}/log`, {
-      method: 'POST',
-      headers: { 'x-metro-token': TOKEN, 'Content-Type': 'text/plain', 'x-metro-kind': 'trail' },
-      body: text.slice(-30000),
-    })
-    return res.ok
-  } catch {
-    return false
-  }
+  return post(text.slice(-30000), 'trail', false)
 }
 
 // 실제 요청마다 부른다. 한도와 폭주를 여기서 막아야 재시도까지 빠짐없이 센다.

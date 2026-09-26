@@ -12,7 +12,7 @@ const ROUTES = {
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'x-metro-token, content-type, x-metro-kind',
+  'Access-Control-Allow-Headers': 'x-metro-token, content-type, x-metro-kind, x-metro-session',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
 }
 
@@ -20,20 +20,28 @@ const reply = (body, status, extra = {}) =>
   new Response(body, { status, headers: { ...cors, ...extra } })
 
 export default {
-  async fetch(request, env) {
+  async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return reply(null, 204)
 
     // 기기 로그. dev 서버는 같은 Wi-Fi에서만 받는다. 지하철에 타면 끊긴다.
-    // 여기로 보내면 `npx wrangler tail`로 어디서든 본다.
-    // 사용자가 "서버로 보내기"로 보낸 묶음(x-metro-kind: trail)은 KV에 14일 보관한다.
-    // tail이 끊겨 있던 사이에 보낸 기록을 놓친 적이 있다(2026-09-26).
+    // 받은 묶음은 D1에 저장한다(개발 기간). tail이 끊겨 있던 사이의 기록을 놓친 적이 있다(2026-09-26).
+    //   x-metro-kind: live(10초 묶음) | trail("서버로 보내기")   x-metro-session: 앱버전-실행ID
     if (request.method === 'POST' && new URL(request.url).pathname === '/log') {
       if (request.headers.get('x-metro-token') !== env.METRO_TOKEN) return reply('forbidden', 403)
       const text = (await request.text()).slice(-30000)
-      if (request.headers.get('x-metro-kind') === 'trail' && env.LOGS) {
-        const key = `trail/${new Date().toISOString()}`
-        await env.LOGS.put(key, text, { expirationTtl: 14 * 24 * 3600 })
-        console.log('[trail] saved', key, text.length)
+      if (env.DB && text.trim()) {
+        const kind = request.headers.get('x-metro-kind') === 'trail' ? 'trail' : 'live'
+        const session = (request.headers.get('x-metro-session') ?? '').slice(0, 40)
+        // 저장이 실패해도 앱에는 성공으로 답한다. 로그 때문에 앱이 재시도를 쌓으면 안 된다.
+        try {
+          await env.DB.prepare('INSERT INTO logs (session, kind, body) VALUES (?, ?, ?)').bind(session, kind, text).run()
+        } catch (e) {
+          console.log('[log] d1 insert failed', String(e))
+        }
+        // 14일 지난 것을 가끔 지운다. 백 번에 한 번이면 충분하다.
+        if (Math.random() < 0.01) {
+          ctx.waitUntil(env.DB.prepare("DELETE FROM logs WHERE at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')").run().catch(() => {}))
+        }
       }
       // 한 줄이 길면 대시보드에서 잘리므로 줄 단위로 나눠 찍는다.
       for (const line of text.split('\n')) if (line.trim()) console.log('[device]', line.slice(0, 600))

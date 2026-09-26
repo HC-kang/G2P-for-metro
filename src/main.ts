@@ -18,7 +18,7 @@ import {
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
 import { plan, planHop, departures, locate, paceMs, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
-import { arrivals, positions, remoteLog, flushLog, sendTrail, setRequestGuard, ApiError, type Arrival } from './api.ts'
+import { arrivals, positions, remoteLog, flushLog, sendTrail, REPORTING, SESSION, setRequestGuard, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 
@@ -35,7 +35,8 @@ const log = (...a: unknown[]) => {
   if (trail.length > LOG_KEEP) trail.shift()
   // 같은 Wi-Fi에 있을 때는 dev server 터미널에, 아닐 때도 볼 수 있게 워커에도 보낸다.
   if (import.meta.env?.DEV) navigator.sendBeacon('/__log', msg)
-  remoteLog(msg)
+  // 서버에서는 10초 묶음이 도착 시각 하나를 공유한다. 폴링 간격과 겹침을 보려면 줄마다 기기 시각이 있어야 한다.
+  remoteLog(`${stamp()} ${msg}`)
 }
 
 // 화면이 죽으면 메모리 기록도 사라진다. 그 직전 것이 가장 쓸모 있으므로 남긴다.
@@ -424,6 +425,8 @@ renderTrail()
 // 버전은 app.json에서 온다. 패키징되는 값과 같아야 문의가 왔을 때 대조할 수 있다.
 $('#version').textContent =
   `${import.meta.env?.VITE_APP_NAME ?? 'Metro'} ${import.meta.env?.VITE_APP_VERSION ?? ''}`.trim()
+  // 개발 기간 자동 보고가 켜져 있으면 숨기지 않는다. 로그에는 위치가 들어간다.
+  + (REPORTING ? ` · 진단 기록 자동 보고 중(${SESSION})` : '')
 
 renderDests()
 renderHits()
