@@ -9,9 +9,15 @@ workers_dev = true
 #   npx wrangler secret put SEOUL_RT_KEY
 #   npx wrangler secret put METRO_TOKEN
 
-# 로그를 Cloudflare가 보존한다. 저장소(KV/D1) 바인딩이 필요 없다.
+# 로그를 Cloudflare가 보존한다. 단, 보존 로그는 wrangler OAuth로는 읽을 수 없다(대시보드만). 그래서 아래 KV를 따로 둔다.
 # wrangler tail은 실시간 스트림이라 붙어 있지 않으면 로그가 사라진다.
 # 이것을 켜면 대시보드와 `wrangler tail --format json` 없이도 나중에 조회할 수 있다.
 [observability]
 enabled = true
 head_sampling_rate = 1
+
+# "서버로 보내기"로 온 기록 묶음만 보관한다(14일). tail은 몇 시간 뒤 조용히 끊겨 있곤 했다(2026-09-26).
+# 읽기: npx wrangler kv key list --binding LOGS --remote / npx wrangler kv key get <key> --binding LOGS --remote
+[[kv_namespaces]]
+binding = "LOGS"
+id = "74b40d7e58974c17bede22353658ff6d"

@@ -109,3 +109,23 @@ test('arrivals는 확인된 이름이면 빈 결과에 예비 이름을 다시 �
     globalThis.fetch = realFetch
   }
 })
+
+test('기기 로그는 모아서 보내고 분당 한도를 넘으면 버린 줄 수만 남긴다', async () => {
+  const { batcher } = await import('./api.ts')
+  const sent: string[] = []
+  let t = 0
+  const b = batcher(s => sent.push(s), { now: () => t, schedule: () => undefined, perMin: 200, maxChars: 100_000 })
+  for (let i = 0; i < 500; i++) b.push(`line ${i}`)
+  assert.equal(sent.length, 0, '10초가 지나기 전에는 보내지 않는다')
+  b.flush()
+  assert.equal(sent.length, 1)
+  const lines = sent[0].split('\n')
+  assert.equal(lines.filter(l => l.startsWith('line')).length, 200)
+  assert.ok(lines.at(-1)!.includes('300줄 버림'), lines.at(-1))
+  b.flush()
+  assert.equal(sent.length, 1, '빈 버퍼는 보내지 않는다. 타이머가 두 번 불려도 한 번만 나간다')
+  t = 60_000
+  b.push('next')
+  b.flush()
+  assert.equal(sent.at(-1), 'next')
+})

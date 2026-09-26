@@ -12,7 +12,7 @@ const ROUTES = {
 
 const cors = {
   'Access-Control-Allow-Origin': '*',
-  'Access-Control-Allow-Headers': 'x-metro-token, content-type',
+  'Access-Control-Allow-Headers': 'x-metro-token, content-type, x-metro-kind',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
 }
 
@@ -24,11 +24,18 @@ export default {
     if (request.method === 'OPTIONS') return reply(null, 204)
 
     // 기기 로그. dev 서버는 같은 Wi-Fi에서만 받는다. 지하철에 타면 끊긴다.
-    // 여기로 보내면 `npx wrangler tail`로 어디서든 본다. 저장하지 않는다.
+    // 여기로 보내면 `npx wrangler tail`로 어디서든 본다.
+    // 사용자가 "서버로 보내기"로 보낸 묶음(x-metro-kind: trail)은 KV에 14일 보관한다.
+    // tail이 끊겨 있던 사이에 보낸 기록을 놓친 적이 있다(2026-09-26).
     if (request.method === 'POST' && new URL(request.url).pathname === '/log') {
       if (request.headers.get('x-metro-token') !== env.METRO_TOKEN) return reply('forbidden', 403)
-      // 덤프도 받는다. 한 줄이 길면 대시보드에서 잘리므로 줄 단위로 나눠 찍는다.
-      const text = (await request.text()).slice(0, 8000)
+      const text = (await request.text()).slice(-30000)
+      if (request.headers.get('x-metro-kind') === 'trail' && env.LOGS) {
+        const key = `trail/${new Date().toISOString()}`
+        await env.LOGS.put(key, text, { expirationTtl: 14 * 24 * 3600 })
+        console.log('[trail] saved', key, text.length)
+      }
+      // 한 줄이 길면 대시보드에서 잘리므로 줄 단위로 나눠 찍는다.
       for (const line of text.split('\n')) if (line.trim()) console.log('[device]', line.slice(0, 600))
       return reply(null, 204)
     }

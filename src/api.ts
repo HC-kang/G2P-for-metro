@@ -101,26 +101,57 @@ export function parseArrivals(body: unknown): Arrival[] {
   }))
 }
 
-// 기기 로그. dev 서버는 같은 Wi-Fi에서만 받으므로 지하철에서는 끊긴다.
-// 워커로 보내면 `npx wrangler tail`로 어디서든 본다. 실패해도 앱을 방해하지 않는다.
-export const remoteLog = (msg: string): void => {
-  if (!BASE) return
-  void fetch(`${BASE}/log`, {
-    method: 'POST',
-    headers: { 'x-metro-token': TOKEN, 'Content-Type': 'text/plain' },
-    body: msg.slice(0, 500),
-    keepalive: true,
-  }).catch(() => {})
+// 기기 로그를 모아 보낸다. 한 줄마다 fetch를 보냈더니 폴링 폭증 때 초당 수십 건이 나가
+// 앱을 더 무겁게 만들었다(09-25 실측). 10초마다 한 번 보내고, 분당 줄 수를 넘으면 버린 줄 수만 남긴다.
+// schedule은 테스트에서 바꿔 끼운다. 한 번짜리 타이머가 두 번 불려도 두 번째는 빈 버퍼라 아무것도 보내지 않는다.
+export function batcher(
+  send: (text: string) => void,
+  { now = Date.now, everyMs = 10_000, perMin = 200, maxChars = 7000,
+    schedule = (fn: () => void, ms: number): unknown => setTimeout(fn, ms) } = {},
+) {
+  let buf: string[] = [], size = 0, dropped = 0, windowAt = -Infinity, inWindow = 0, pending = false
+  const flush = (): void => {
+    pending = false
+    if (dropped) { buf.push(`(로그 ${dropped}줄 버림: 분당 ${perMin}줄 초과)`); dropped = 0 }
+    if (!buf.length) return
+    const text = buf.join('\n')
+    buf = []; size = 0
+    send(text)
+  }
+  const push = (line: string): void => {
+    const t = now()
+    if (t - windowAt >= 60_000) { windowAt = t; inWindow = 0 }
+    if (++inWindow > perMin) { dropped++; return }
+    const l = line.slice(0, 500)
+    buf.push(l); size += l.length + 1
+    if (size >= maxChars) return flush()
+    if (!pending) { pending = true; schedule(flush, everyMs) }
+  }
+  return { push, flush }
 }
+
+// dev 서버는 같은 Wi-Fi에서만 받으므로 지하철에서는 끊긴다. 워커로 보내면 `npx wrangler tail`로 어디서든 본다.
+const logs = BASE
+  ? batcher(text => void fetch(`${BASE}/log`, {
+      method: 'POST',
+      headers: { 'x-metro-token': TOKEN, 'Content-Type': 'text/plain' },
+      body: text,
+      keepalive: true,
+    }).catch(() => {}))
+  : null
+export const remoteLog = (msg: string): void => logs?.push(msg)
+// 화면이 꺼지거나 앱이 끝날 때 남은 것을 바로 보낸다.
+export const flushLog = (): void => logs?.flush()
 
 // 기록 묶음을 보낸다. 성공 여부를 돌려주므로 화면이 사실대로 말할 수 있다.
 export async function sendTrail(text: string): Promise<boolean> {
   if (!BASE) return false
   try {
+    // x-metro-kind: trail 이면 워커가 KV에 보관한다. tail이 끊겨 있어도 나중에 꺼내 볼 수 있다.
     const res = await fetch(`${BASE}/log`, {
       method: 'POST',
-      headers: { 'x-metro-token': TOKEN, 'Content-Type': 'text/plain' },
-      body: text.slice(0, 8000),
+      headers: { 'x-metro-token': TOKEN, 'Content-Type': 'text/plain', 'x-metro-kind': 'trail' },
+      body: text.slice(-30000),
     })
     return res.ok
   } catch {

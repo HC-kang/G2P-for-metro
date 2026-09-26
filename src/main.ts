@@ -16,7 +16,7 @@ import {
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
 import { plan, planHop, departures, locate, paceMs, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
-import { arrivals, positions, remoteLog, sendTrail, setRequestGuard, ApiError, type Arrival } from './api.ts'
+import { arrivals, positions, remoteLog, flushLog, sendTrail, setRequestGuard, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 
@@ -41,7 +41,43 @@ const keepTrail = () => bridge.setLocalStorage('trail', trail.slice(-LOG_KEEP).j
 window.addEventListener('error', e => { log('error', e.message); void keepTrail() })
 window.addEventListener('unhandledrejection', e => { log('rejection', e.reason); void keepTrail() })
 
+// 개발 모드 ?timers=dup: SDK 그림자 타이머의 이중 실행을 흉내 낸다(constraints.md 2026-09-26).
+// 한 번짜리 타이머가 제시간에 한 번, 0.3초 뒤 한 번 더 불린다. clearTimeout은 둘 다 지운다. 배포본은 타지 않는다.
+if (import.meta.env?.DEV && new URLSearchParams(location.search).get('timers') === 'dup') {
+  const st = window.setTimeout.bind(window), ct = window.clearTimeout.bind(window)
+  const twin = new Map<number, number>()
+  window.setTimeout = ((fn: TimerHandler, ms?: number, ...a: unknown[]) => {
+    const id = st(fn, ms, ...a) as unknown as number
+    twin.set(id, st(fn, (ms ?? 0) + 300, ...a) as unknown as number)
+    return id
+  }) as typeof setTimeout
+  window.clearTimeout = ((id?: number) => {
+    ct(id)
+    if (id != null) { ct(twin.get(id)); twin.delete(id) }
+  }) as typeof clearTimeout
+}
+
+// SDK 0.0.15의 그림자 타이머는 한 번짜리 타이머를 두 번 부를 수 있다. 폰을 잠그고 타면 실제로 그랬고,
+// 폴링 사슬이 주기마다 두 배가 되어 몇 분 만에 앱이 멈췄다(constraints.md 2026-09-26).
+// 앱의 한 번짜리 타이머는 모두 later로 건다. 두 번째 호출은 아무것도 하지 않는다.
+function later(fn: () => void, ms: number): ReturnType<typeof setTimeout> {
+  let done = false
+  return setTimeout(() => { if (!done) { done = true; fn() } }, ms)
+}
+// 반복 타이머도 겹쳐 불릴 수 있다. 주기의 절반 안에 다시 불리면 건너뛴다.
+function every(fn: () => void, ms: number): ReturnType<typeof setInterval> {
+  let last = 0
+  return setInterval(() => { const now = Date.now(); if (now - last < ms / 2) return; last = now; fn() }, ms)
+}
+
 const bridge = await waitForEvenAppBridge()
+
+// 폰이 잠기거나 앱이 뒤로 가는 순간을 남긴다. 그림자 타이머가 도는 구간이 이때부터다.
+// 가려질 때 기록을 저장하고 모아 둔 로그를 보낸다. 그 뒤에 앱이 끝나도 다음 실행에서 보낼 수 있다.
+document.addEventListener('visibilitychange', () => {
+  log('visibility', document.visibilityState)
+  if (document.visibilityState === 'hidden') { void keepTrail(); flushLog() }
+})
 
 // ---------- G2 화면 ----------
 // 화면 하나에 컨테이너 하나를 꽉 채운다. 테두리 상자를 쌓지 않는다.
@@ -444,7 +480,7 @@ let showFails = 0
 // 탭 처리 중(도착 정보를 기다리는 중)에도 시계와 스피너는 돌아야 한다. 예전에는 이때 멈춰서
 // 스피너가 가장 필요한 순간에 정지했다. 이때는 글자만 갈아끼운다. 페이지를 다시 만들면 처리 중인 전환과 부딪힌다.
 // 주행 모드의 current는 탑승 전 화면의 것이라 믿지 않는다. 주행 화면은 render가 그린다.
-const ticker = setInterval(() => {
+const ticker = every(() => {
   if (rendering || showFails >= SHOW_FAIL_STOP) return
   if (listHead) void tickHead(listHead())
   else if (busy) { if (pageIsText && current && mode !== 'riding') void tickText(current()) }
@@ -661,7 +697,7 @@ function startOriginWatch(gen: number, since: number): void {
     }
   }
   if (simFeed) {
-    originWatch = setInterval(() => { void simLocation().then(l => { if (l) void onFix(l) }) }, 3000)
+    originWatch = every(() => { void simLocation().then(l => { if (l) void onFix(l) }) }, 3000)
   } else {
     originUnsub = bridge.onAppLocationChanged(l => { void onFix(l) })
     Promise.resolve(bridge.startAppLocationUpdates({ accuracy: AppLocationAccuracy.High, intervalMs: 3000 }))
@@ -680,7 +716,7 @@ async function showOrigin(): Promise<void> {
   const gen = ++originGen
   const since = Date.now()
   // 위치가 금방 오면 목록으로 바로 간다. 늦으면(실기기에서 최대 10초) 탭이 먹혔다는 것부터 보인다.
-  const slow = setTimeout(() => {
+  const slow = later(() => {
     if (gen === originGen) void showLive(() => S.loading(Date.now(), '출발역 찾는 중', '위치 받는 중'))
   }, 300)
   const quick = await quickFix()
@@ -845,7 +881,7 @@ async function showPick(autoBoard = true, quiet = false): Promise<void> {
   const ln = leg().line
   // 조회에 시간이 걸린다. 탭이 먹혔다는 것을 먼저 보여준다.
   if (!quiet) await showLive(() => S.loading(Date.now(), from, `${ln} 열차 확인 중`))
-  const hold = () => (quiet ? new Promise(r => setTimeout(r, Math.max(0, routeShownAt + ROUTE_HOLD_MS - Date.now()))) : null)
+  const hold = () => (quiet ? new Promise<void>(r => later(r, Math.max(0, routeShownAt + ROUTE_HOLD_MS - Date.now()))) : null)
   let all: Arrival[]
   try {
     all = await arrivals(from)
@@ -919,7 +955,7 @@ let autoRepicks = 0
 function retryPick(sec: number, why: string): void {
   const g = pickGen
   log('pick retry in', sec + 's', why)
-  setTimeout(() => { if (g === pickGen && mode === 'pick' && !busy) void showPick(true) }, sec * 1000)
+  later(() => { if (g === pickGen && mode === 'pick' && !busy) void showPick(true) }, sec * 1000)
 }
 
 async function board(a: Arrival): Promise<void> {
@@ -944,7 +980,14 @@ async function board(a: Arrival): Promise<void> {
   misses = 0
   nextPollAt = Date.now()
   // 탭 핸들러 안에서는 busy라 poll이 조회를 건너뛴다. 실기기에서 첫 조회가 20초 늦었다. 핸들러가 끝난 직후에 돈다.
-  pollTimer = setTimeout(() => poll(pollGen, 'boarded'), 0)
+  schedulePoll(pollGen, 0, 'boarded')
+}
+
+// 폴링 예약은 언제나 하나뿐이다. 새로 걸기 전에 걸려 있던 것을 지운다.
+// 타이머가 어떤 이유로 겹쳐 불려도 사슬이 둘로 갈라지지 않는다.
+function schedulePoll(gen: number, ms: number, why: string): void {
+  if (pollTimer) clearTimeout(pollTimer)
+  pollTimer = later(() => { pollTimer = null; void poll(gen, why) }, ms)
 }
 
 // ---------- 추적 ----------
@@ -1001,7 +1044,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         if (gen === pollGen && mode === 'riding') {
           pollWait = e.waitSec * 1000
           nextPollAt = Date.now() + pollWait
-          pollTimer = setTimeout(() => poll(gen, 'burst'), pollWait)
+          schedulePoll(gen, pollWait, 'burst')
         }
         return
       }
@@ -1025,7 +1068,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
   if (gen === pollGen && mode === 'riding') {
     pollWait = pollDelay()
     nextPollAt = Date.now() + pollWait
-    pollTimer = setTimeout(() => poll(gen), pollWait)
+    schedulePoll(gen, pollWait, 'timer')
   }
 }
 
@@ -1077,7 +1120,7 @@ async function replanHere(): Promise<void> {
 // 잠깐만 머리줄에 띄우는 말. 그새 다른 말로 바뀌었으면 건드리지 않는다.
 function flashNote(text: string): void {
   note = text
-  setTimeout(() => { if (note === text) { note = ''; void render() } }, 6000)
+  later(() => { if (note === text) { note = ''; void render() } }, 6000)
 }
 
 async function render(): Promise<void> {
@@ -1203,9 +1246,9 @@ function startTransferWatch(): void {
     stopTransferWatch()
     if (mode === 'transfer' && legIndex === idx && !busy) { log('transfer auto', why); void startLeg(idx + 1) }
   }
-  transferTimer = setTimeout(() => advance('timeout'), FAST_POLL ? 20_000 : 90_000)
+  transferTimer = later(() => advance('timeout'), FAST_POLL ? 20_000 : 90_000)
   if (!tn) return
-  transferPoll = setInterval(() => {
+  transferPoll = every(() => {
     if (mode !== 'transfer') return stopTransferWatch()
     positions(ln).then(list => {
       const me = list.find(t => t.trainNo === tn)
@@ -1297,6 +1340,10 @@ async function handle(type: OsEventTypeList, index: number): Promise<void> {
 const unsubscribe = bridge.onEvenHubEvent(async event => {
   const type = eventTypeOf(event.listEvent) ?? eventTypeOf(event.textEvent) ?? eventTypeOf(event.sysEvent)
   if (type === OsEventTypeList.SYSTEM_EXIT_EVENT || type === OsEventTypeList.ABNORMAL_EXIT_EVENT) {
+    // 누가 앱을 끝냈는지 남긴다. 예전에는 기록이 없어 '안내가 꺼졌다'의 원인을 로그로 가를 수 없었다.
+    log('exit', type === OsEventTypeList.SYSTEM_EXIT_EVENT ? 'system' : 'abnormal', 'mode', mode)
+    void keepTrail()
+    flushLog()
     stopPolling()
     stopOriginWatch()
     stopTransferWatch()

@@ -92,3 +92,9 @@ dev server 로그(`/__log`)는 같은 Wi-Fi에서만 받으므로 지하철에 �
 3. **시뮬레이터 흐름:** 스크립트 드라이버(`drv.sh`: `gps`, `arr`, `pos`, `tap click|double_click|up|down`, `shot`)로 출발역→목적지→경로 없음→선택지→요약→열차→대기→메뉴→재탐색→하차→도착→다음 출발역을 차례로 찍는다. 입력 뒤에는 처리 시간(요약 1.5초 포함)을 기다려야 다음 입력이 먹는다.
 4. **폰 화면 캡처:** 시뮬레이터 Browser 창은 다른 창에 가려져 있다. 화면 좌표로 찍으면 남의 창이 찍힌다. CoreGraphics로 창 ID를 얻어 `screencapture -x -o -l <id>`로 그 창만 찍는다.
 5. dev 서버의 앱 버전 표시는 서버를 켤 때 읽은 `app.json` 값이다. 패키지 빌드에는 최신 값이 들어간다.
+
+## 2026-09-26 — 기기 로그 읽는 법
+1. 실시간: `nohup scripts/tail-logs.sh >/dev/null 2>&1 &` → `/tmp/metro-tail.jsonl`. 예쁘게 찍힌 JSON 객체가 이어진 형식이라 `json.JSONDecoder().raw_decode`로 하나씩 푼다. 브라우저 UA에 `Macintosh`가 있으면 시뮬레이터, 아니면 폰이다.
+2. 보내기 묶음: `cd worker && npx wrangler kv key list --binding LOGS --remote`, `npx wrangler kv key get <key> --binding LOGS --remote`.
+3. tail이 사는지 확인: 워커에 아무 요청이나 보내고 파일 크기가 늘어나는지 본다.
+4. 폭증 진단: 세션마다 분당 `poll`/`req`/`burst guard` 수와 같은 초에 겹친 `poll` 수를 센다. 주기마다 두 배면 타이머 이중 실행이다.
