@@ -112,3 +112,5 @@ dev server 로그(`/__log`)는 같은 Wi-Fi에서만 받으므로 지하철에 �
 - 사용자는 Dia 브라우저에 로그인해 둔다. Claude in Chrome 확장은 연결되어 있지 않았다. Orca 내장 브라우저에는 로그인 세션이 없다(로그인 입력은 하지 않는다).
 - `orca computer`로 Dia 창을 조작할 수 있지만, 창이 다른 데스크톱 공간에 전체 화면으로 있으면 `window_not_found`/`window_not_focused`로 막힌다. AppleScript activate로도 공간이 바뀌지 않았다. 창이 현재 공간에 있을 때만 된다.
 - 2026-09-26 기준 Hub에 올라간 마지막 빌드는 v0.4.0이다. 0.4.1은 올리지 않았다.
+- 갱신: 사용자가 Orca 내장 브라우저에 Even Hub를 로그인한 채 열어 두면 `orca tab list --worktree all --json`으로 탭을 찾고 `--page <browserPageId>`로 snapshot/click/upload를 한다. 업로드 입력은 `orca upload --element <ref> --files <path>`. 올린 뒤 Build details의 크기를 `out.ehpk`와 대조한다.
+- 2026-09-26: v0.4.2가 Hub에 올라갔다(78.7 KB, out.ehpk 78,705바이트와 일치).
