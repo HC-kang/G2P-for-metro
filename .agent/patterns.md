@@ -106,3 +106,9 @@ dev server 로그(`/__log`)는 같은 Wi-Fi에서만 받으므로 지하철에 �
 - 결과(같은 시나리오, 실제 폴링 주기): 고치기 전 0.4.0은 앞 화면 틱 150초에 폴링 19번(주기당 1→2→4→5), 잠금 해제 순간 밀린 폴링 5번 동시 실행. 0.4.2는 150초에 7번, 잠금·해제 모두 주기당 1번.
 - 시나리오 스크립트에서 고치기 전 코드를 돌릴 때는 `git show <커밋>:src/main.ts > src/main.ts`로 바꾸고 `import './devhost.ts'`를 넣는다. 끝나면 `git checkout HEAD -- src/main.ts`. 이렇게 되돌리면 커밋 안 한 편집도 사라지니 먼저 커밋하거나 다시 적용한다.
 - dev 서버 `/__log`는 줄마다 시각을 붙인다. 간격과 겹침은 시각으로 본다.
+
+## 2026-09-26 Even Hub 빌드 업로드 경로
+- 업로드는 웹(hub.evenrealities.com/hub/com.ford.metro → Builds → Upload a build)으로만 한다. `evenhub` CLI에는 login/init/pack/qr뿐이고 업로드 명령이 없다.
+- 사용자는 Dia 브라우저에 로그인해 둔다. Claude in Chrome 확장은 연결되어 있지 않았다. Orca 내장 브라우저에는 로그인 세션이 없다(로그인 입력은 하지 않는다).
+- `orca computer`로 Dia 창을 조작할 수 있지만, 창이 다른 데스크톱 공간에 전체 화면으로 있으면 `window_not_found`/`window_not_focused`로 막힌다. AppleScript activate로도 공간이 바뀌지 않았다. 창이 현재 공간에 있을 때만 된다.
+- 2026-09-26 기준 Hub에 올라간 마지막 빌드는 v0.4.0이다. 0.4.1은 올리지 않았다.
