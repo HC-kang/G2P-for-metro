@@ -95,6 +95,14 @@ test('track은 관측, 추정, 남은 역, 하차역을 그린다', () => {
   assert.equal(S.track(6, 0, 0), '●○○○○◎')
   const bar = S.track(30, 20, 0, 10)
   assert.ok(bar.startsWith('─') && bar.endsWith('◎') && bar.length === 10, bar)
+  // 긴 구간 초반에도 지금 위치가 보여야 한다. 예전에는 '─○○○○○○○○◎'만 보였다.
+  assert.equal(S.track(12, 2, 1), '─●◌○○○○○─◎')
+  assert.equal(S.track(12, 0, 0), '●○○○○○○○─◎')
+  assert.equal(S.track(12, 10, 0), '─●●●●●●●●◎'.slice(0, 1) + '●'.repeat(8) + '◎')
+  for (let i = 0; i < 29; i++) {
+    const b = S.track(30, i, 0)
+    assert.ok([...b].length === 10 && b.endsWith('◎') && b.includes('●'), `${i}: ${b}`)
+  }
 })
 
 test('riding은 지금 어디인지와 다음 역을 함께 보여준다', () => {

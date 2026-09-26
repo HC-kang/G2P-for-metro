@@ -24,10 +24,21 @@ export default defineConfig({
         res.setHeader('Cache-Control', 'no-store')
         try { res.end(readFileSync(`.dev/${kind}.json`, 'utf8')) } catch { res.end('{}') }
       })
+      // 모사 호스트 상태. .dev/host.json {"background": true}면 앱이 뒤로 간 것이다(src/devhost.ts, ?host=ios).
+      server.middlewares.use('/__host', (_req, res) => {
+        res.setHeader('Content-Type', 'application/json')
+        res.setHeader('Cache-Control', 'no-store')
+        try { res.end(readFileSync('.dev/host.json', 'utf8')) } catch { res.end('{"background":false}') }
+      })
+      // 시각을 붙인다. 폴링 간격과 겹침은 시각이 있어야 보인다. 묶음으로 온 로그는 줄마다 찍는다.
       server.middlewares.use('/__log', (req, res) => {
         let body = ''
         req.on('data', c => (body += c))
-        req.on('end', () => { console.log('[device]', body); res.end() })
+        req.on('end', () => {
+          const at = new Date().toTimeString().slice(0, 8)
+          for (const line of body.split('\n')) console.log(at, '[device]', line)
+          res.end()
+        })
       })
     },
   }],

@@ -98,3 +98,11 @@ dev server 로그(`/__log`)는 같은 Wi-Fi에서만 받으므로 지하철에 �
 2. 보내기 묶음: `cd worker && npx wrangler kv key list --binding LOGS --remote`, `npx wrangler kv key get <key> --binding LOGS --remote`.
 3. tail이 사는지 확인: 워커에 아무 요청이나 보내고 파일 크기가 늘어나는지 본다.
 4. 폭증 진단: 세션마다 분당 `poll`/`req`/`burst guard` 수와 같은 초에 겹친 `poll` 수를 센다. 주기마다 두 배면 타이머 이중 실행이다.
+
+## 2026-09-26 폰 잠금 흉내 (시뮬레이터 정밀 검증)
+- `?host=ios` + `.dev/host.json {"background": bool, "ticks": bool}`. `src/devhost.ts`가 main.ts의 첫 import로 SDK보다 먼저 실행된다. SDK가 붙잡는 '진짜 타이머'를 멈출 수 있는 것으로 바꿔 끼운다.
+  - background: 진짜 타이머를 멈추고 만기된 콜백을 붙잡았다가 앞으로 올 때 한꺼번에 부른다. `visibilityState`가 hidden이 된다.
+  - background 또는 ticks: 1초마다 SDK의 실제 `__tickShadowTimers(실제 경과ms)`를 부른다. 고정 1000을 보내면 가려진 시뮬레이터 창에서 macOS가 타이머를 늦춰 시각이 틀어진다.
+- 결과(같은 시나리오, 실제 폴링 주기): 고치기 전 0.4.0은 앞 화면 틱 150초에 폴링 19번(주기당 1→2→4→5), 잠금 해제 순간 밀린 폴링 5번 동시 실행. 0.4.2는 150초에 7번, 잠금·해제 모두 주기당 1번.
+- 시나리오 스크립트에서 고치기 전 코드를 돌릴 때는 `git show <커밋>:src/main.ts > src/main.ts`로 바꾸고 `import './devhost.ts'`를 넣는다. 끝나면 `git checkout HEAD -- src/main.ts`. 이렇게 되돌리면 커밋 안 한 편집도 사라지니 먼저 커밋하거나 다시 적용한다.
+- dev 서버 `/__log`는 줄마다 시각을 붙인다. 간격과 겹침은 시각으로 본다.

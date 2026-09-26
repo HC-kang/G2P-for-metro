@@ -7,6 +7,8 @@ const fatal = (what: string) => {
 window.addEventListener('error', e => fatal(e.message))
 window.addEventListener('unhandledrejection', e => fatal(String((e as PromiseRejectionEvent).reason)))
 
+// 개발 모드 ?host=ios 흉내 장치. SDK보다 먼저 실행되어야 한다. 배포본에서는 빈 모듈이다.
+import './devhost.ts'
 import {
   waitForEvenAppBridge,
   TextContainerProperty, ListContainerProperty, ListItemContainerProperty,
@@ -41,22 +43,6 @@ const keepTrail = () => bridge.setLocalStorage('trail', trail.slice(-LOG_KEEP).j
 window.addEventListener('error', e => { log('error', e.message); void keepTrail() })
 window.addEventListener('unhandledrejection', e => { log('rejection', e.reason); void keepTrail() })
 
-// 개발 모드 ?timers=dup: SDK 그림자 타이머의 이중 실행을 흉내 낸다(constraints.md 2026-09-26).
-// 한 번짜리 타이머가 제시간에 한 번, 0.3초 뒤 한 번 더 불린다. clearTimeout은 둘 다 지운다. 배포본은 타지 않는다.
-if (import.meta.env?.DEV && new URLSearchParams(location.search).get('timers') === 'dup') {
-  const st = window.setTimeout.bind(window), ct = window.clearTimeout.bind(window)
-  const twin = new Map<number, number>()
-  window.setTimeout = ((fn: TimerHandler, ms?: number, ...a: unknown[]) => {
-    const id = st(fn, ms, ...a) as unknown as number
-    twin.set(id, st(fn, (ms ?? 0) + 300, ...a) as unknown as number)
-    return id
-  }) as typeof setTimeout
-  window.clearTimeout = ((id?: number) => {
-    ct(id)
-    if (id != null) { ct(twin.get(id)); twin.delete(id) }
-  }) as typeof clearTimeout
-}
-
 // SDK 0.0.15의 그림자 타이머는 한 번짜리 타이머를 두 번 부를 수 있다. 폰을 잠그고 타면 실제로 그랬고,
 // 폴링 사슬이 주기마다 두 배가 되어 몇 분 만에 앱이 멈췄다(constraints.md 2026-09-26).
 // 앱의 한 번짜리 타이머는 모두 later로 건다. 두 번째 호출은 아무것도 하지 않는다.
@@ -78,6 +64,19 @@ document.addEventListener('visibilitychange', () => {
   log('visibility', document.visibilityState)
   if (document.visibilityState === 'hidden') { void keepTrail(); flushLog() }
 })
+
+// 호스트가 그림자 틱을 언제 보내는지 실기기에서 배운다. SDK는 틱마다 'shadow-timer:tick' 이벤트를 낸다.
+// 앞 화면에서도 틱이 오는지(실기기 로그의 '1초 안에 두 번째 폴링'은 그쪽을 가리킨다) 1분마다 세어 남긴다.
+let shadowTicks = 0, shadowFired = 0
+window.addEventListener('shadow-timer:tick', e => {
+  shadowTicks += 1
+  shadowFired += (e as CustomEvent<{ fired?: number }>).detail?.fired ?? 0
+})
+every(() => {
+  if (!shadowTicks) return
+  log('shadow ticks', shadowTicks, 'fired', shadowFired, 'visible', document.visibilityState)
+  shadowTicks = shadowFired = 0
+}, 60_000)
 
 // ---------- G2 화면 ----------
 // 화면 하나에 컨테이너 하나를 꽉 채운다. 테두리 상자를 쌓지 않는다.
@@ -1239,20 +1238,28 @@ function stopTransferWatch(): void {
 function startTransferWatch(): void {
   stopTransferWatch()
   const at = stops[stops.length - 1]
+  // 환승역 앞의 역들. 타던 열차가 아직 여기 있으면 환승역에 닿기 전이다.
+  // 주행 화면은 속도 추정으로 열차보다 먼저 도착을 선언할 수 있다. 그때 앞 역의 열차를 '떠났다'로 읽으면
+  // 사용자가 아직 타고 있는데 다음 열차를 고른다(2026-09-26 시뮬레이터에서 발견).
+  const before = stops.slice(0, -1)
   const tn = train?.trainNo
   const ln = leg().line
   const idx = legIndex
+  const limit = FAST_POLL ? 20_000 : 90_000
+  let deadline = Date.now() + limit
   const advance = (why: string) => {
     stopTransferWatch()
     if (mode === 'transfer' && legIndex === idx && !busy) { log('transfer auto', why); void startLeg(idx + 1) }
   }
-  transferTimer = later(() => advance('timeout'), FAST_POLL ? 20_000 : 90_000)
-  if (!tn) return
+  if (!tn) { transferTimer = later(() => advance('timeout'), limit); return }
   transferPoll = every(() => {
     if (mode !== 'transfer') return stopTransferWatch()
+    if (Date.now() > deadline) return advance('timeout')
     positions(ln).then(list => {
       const me = list.find(t => t.trainNo === tn)
-      if (me && (me.station !== at || me.status === 2)) advance(`old train ${me.station} ${S.statusWord(me.status)}`)
+      if (!me) return
+      if (before.includes(me.station)) { deadline = Date.now() + limit; log('transfer wait: train still at', me.station); return }
+      if (me.station !== at || me.status === 2) advance(`old train ${me.station} ${S.statusWord(me.status)}`)
     }).catch(e => log('transfer watch failed', e))
   }, FAST_POLL ? 5_000 : 20_000)
 }

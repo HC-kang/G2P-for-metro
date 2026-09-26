@@ -108,8 +108,14 @@ export function track(len: number, index: number, estimated: number, cells = 10)
     else if (i > index - estimated) marks.push('◌')
     else marks.push('●')
   }
-  // 하차역 쪽이 중요하다. 앞을 줄인다. ⋯는 안경 폰트에서 확인되지 않았다. 확인된 ─로 앞이 더 있다고 보인다.
-  return marks.length <= cells ? marks.join('') : '─' + marks.slice(marks.length - (cells - 1)).join('')
+  if (marks.length <= cells) return marks.join('')
+  // 길면 줄이되 지금 위치와 하차역은 반드시 남긴다. 앞만 자르던 때는 12정거장 구간 초반에
+  // 지금 위치가 잘려 '─○○○○○○○○◎'만 보였다(2026-09-26 시뮬레이터). 줄인 자리는 ─로 보인다.
+  // ⋯는 안경 폰트에서 확인되지 않았다. 확인된 ─를 쓴다.
+  const from = Math.max(0, index - 1)
+  if (from + cells >= marks.length) return '─' + marks.slice(marks.length - (cells - 1)).join('')
+  const head = from > 0 ? '─' : ''
+  return head + marks.slice(from, from + cells - 2 - head.length).join('') + '─◎'
 }
 
 // 한 줄이 넘치면 띄어쓰기에서 접는다. 기기가 제멋대로 접으면 들여쓰기가 깨지고 아래가 밀린다.
