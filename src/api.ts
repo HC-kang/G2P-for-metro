@@ -198,10 +198,15 @@ export const setServerUsedListener = (fn: (n: number) => void): void => { onServ
 // 요청이 서버에 닿지도 못했다(오프라인). 기기 카운터에서 되돌린다. 긴 장애가 그날 한도를 거짓으로 채웠다(리뷰 3라운드).
 let onUnsent: () => void = () => {}
 export const setUnsentListener = (fn: () => void): void => { onUnsent = fn }
-// 마지막으로 서버가 정상 응답한 시각. 실패가 10분 이어지면 앱이 재시도를 멈춘다(리뷰 3라운드).
-let okAt = Date.now()
+// 연속 실패가 시작된 시각(0이면 지금 정상). 실패가 10분 이어지면 앱이 재시도를 멈춘다(리뷰 3라운드).
+// '마지막 정상 응답'부터 재면 한동안 조회가 없던 뒤의 첫 실패 한 번에 멈췄다. 정상은 읽을 수 있는 본문까지다
+// (HTTP 200이어도 JSON이 아니거나 서울 API 일시 오류면 실패다, 리뷰 4라운드).
+let failAt = 0
 const FETCH_TIMEOUT_MS = 10_000
-export const lastOkAt = (): number => okAt
+export const failingFor = (): number => (failAt ? Date.now() - failAt : 0)
+const failed = (e: Error): Error => { failAt ||= Date.now(); return e }
+// 서울 API가 HTTP 200 본문으로 주는 일시 오류. 기다리면 낫는다. 10분 상한 안에서 다시 시도한다.
+const TRANSIENT = new Set(['ERROR-500', 'ERROR-600'])
 
 const get = async (path: string): Promise<unknown> => {
   beforeRequest(path)
@@ -214,19 +219,24 @@ const get = async (path: string): Promise<unknown> => {
   } catch (e) {
     // 끊겨서 서버에 닿지도 못했다면 기기 카운터에서 되돌린다. 시간 초과는 서버가 부른 뒤일 수 있어 그대로 센다.
     if ((e as Error)?.name !== 'AbortError') onUnsent()
-    throw e
+    throw failed(e as Error)
   } finally {
     clearTimeout(timer)
   }
   const n = Number(res.headers?.get?.('x-metro-used'))
   if (n > 0) onServerUsed(n)
   else if (res.ok) onServerUsed(-1)
-  if (res.status === 403) throw new ConfigError('앱 설정이 서버와 맞지 않습니다')
+  if (res.status === 403) throw failed(new ConfigError('앱 설정이 서버와 맞지 않습니다'))
   // 워커가 오늘 한도 가까이 막았다. 토큰이 새도 남이 한도를 다 쓰지 못하게 하는 장치다.
   if (res.status === 429) throw new ApiError('ERROR-337', '오늘 조회 한도(950건)를 다 썼습니다')
-  if (!res.ok) throw new Error(`서버 ${res.status}`)
-  okAt = Date.now()
-  return res.json()
+  if (!res.ok) throw failed(new Error(`서버 ${res.status}`))
+  let body: unknown
+  try { body = await res.json() } catch { throw failed(new Error('서버 응답을 읽지 못했습니다')) }
+  const b = body as { errorMessage?: { code?: string }; code?: string } | null
+  const code = String(b?.errorMessage?.code ?? b?.code ?? '')
+  if (TRANSIENT.has(code)) throw failed(new Error(`서울 API 일시 오류 ${code}`))
+  failAt = 0
+  return body
 }
 
 // train을 주면 워커가 그 열차 한 대만 돌려준다. 노선 전체(수십 대)를 받던 것을 줄인다(통신량).

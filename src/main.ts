@@ -18,7 +18,7 @@ import {
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
 import { plan, planHop, departures, locate, legEta, hops, paceMs, reaches, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
-import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, lastOkAt, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
+import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 import { closest, doubleTapAction, doubleTapHint, type DoubleTapState } from './controls.ts'
@@ -266,9 +266,9 @@ setServerUsedListener(n => {
   if (n > used) { used = n; void bridge.setLocalStorage('quota', `${usedDay}:${used}`) }
 })
 setUnsentListener(() => { used = Math.max(0, used - 1) })
-// 서버가 10분 넘게 정상 응답을 못 주면(오프라인, 워커 5xx) 재시도를 멈춘다. 몇 시간씩 돌지 않는다(리뷰 3라운드).
+// 실패가 10분 넘게 이어지면(오프라인, 워커 5xx, 읽을 수 없는 응답, 서울 일시 오류) 재시도를 멈춘다(리뷰 3·4라운드).
 const SERVER_DOWN_MS = 10 * 60_000
-const serverDown = () => Date.now() - lastOkAt() > SERVER_DOWN_MS
+const serverDown = () => failingFor() > SERVER_DOWN_MS
 
 const saveDests = () => bridge.setLocalStorage('destinations', dests.join('\n'))
 
@@ -553,9 +553,13 @@ let showFails = 0
 // 주행 모드의 current는 탑승 전 화면의 것이라 믿지 않는다. 주행 화면은 render가 그린다.
 // 안경을 벗으면 아무도 안 보는 매초 쓰기를 멈춘다. 조회 결과로 바뀌는 내용은 폴링이 그린다(리뷰 2라운드).
 let wearing = true
+// 배터리 %가 바뀐 시각을 남긴다. 1% 단위라 시작·끝 두 점만으로는 짧은 주행의 %/h 오차가 크다. 기울기로 잰다(리뷰 4라운드).
+let lastBattery: number | undefined
 bridge.onDeviceStatusChanged(st => {
   const w = st?.isWearing !== false
   if (w !== wearing) { wearing = w; log('wearing', w) }
+  const b = st?.batteryLevel
+  if (typeof b === 'number' && b !== lastBattery && !st?.isCharging) { lastBattery = b; log('battery change', b, 'mode', mode, 'sec', S.clock.seconds) }
 })
 const ticker = every(() => {
   if (rendering || showFails >= SHOW_FAIL_STOP || !wearing) return
@@ -836,6 +840,23 @@ const snapshot = (): Resume => ({
 })
 // 주행 중에 열차를 다시 고르러 가면(놓침 탭, 메뉴) 지금 추적을 남겨 둔다. 목록 맨 위 '← 타고 있음 · 계속 안내',
 // 더블탭, 또는 20초 동안 아무것도 안 고르면 그대로 돌아온다. 실수 탭으로 하차 안내를 잃지 않는다(리뷰 2라운드).
+// 주행을 앱이 멈춘다(한도·키·토큰·서버 무응답·열차 끊김). 출발역 목록에 이어가기를 남기고(5분) 주행 요약도 남긴다.
+// 전에는 여정을 조용히 잃었고, 요약은 정상 도착에서만 남았다(리뷰 4라운드). 머리줄에는 노선을 둔다(멈춤 화면 공통).
+async function stopRide(why: string, title: string, body: string): Promise<void> {
+  log('ride stopped', why)
+  resume = snapshot()
+  stopPolling()
+  mode = 'arrived'
+  rows = []
+  void logBattery('stopped').then(rideSummary)
+  const ln = leg().line
+  return showLive(() => S.notice(Date.now(), title, body, '탭: 처음으로\n더블탭: 종료', ln))
+}
+// 서울 API 오류의 부제. 한도는 자정에 풀리지만 키 오류는 그렇지 않다(리뷰 4라운드: 모든 오류에 '자정에 초기화').
+const apiErrorNote = (e: ApiError): string => (e.code === 'ERROR-337' || e.code === 'ERROR-336' ? '자정에 초기화됩니다' : '서버의 API 키를 확인하세요')
+// 같은 빌드를 다시 설치해도 토큰은 그대로다. 사실대로 말한다(리뷰 4라운드).
+const CONFIG_NOTE = '빌드 토큰과 워커 비밀값이 다릅니다'
+
 async function repick(why: string): Promise<void> {
   repickFrom = snapshot()
   log('repick', why)
@@ -1086,8 +1107,8 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
     }
     // 한도 소진은 기다려도 낫지 않는다. 자정까지는 앱이 할 수 있는 게 없다.
     if (e instanceof QuotaError) return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · 자정에 초기화`, backHint()))
-    if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, '자정에 초기화됩니다', backHint()))
-    if (e instanceof ConfigError) return showLive(() => S.notice(Date.now(), e.message, '앱을 다시 설치하세요', backHint()))
+    if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, apiErrorNote(e), backHint()))
+    if (e instanceof ConfigError) return showLive(() => S.notice(Date.now(), e.message, CONFIG_NOTE, backHint()))
     if (serverDown()) {
       log('server down, stop retrying')
       return showLive(() => S.notice(Date.now(), '서버 응답이 없습니다', '10분 넘게 받지 못해 멈췄습니다', `탭: 다시 확인\n${backHint()}`, from))
@@ -1130,7 +1151,9 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
   if (prefer) {
     // 원래 예정과 2분 넘게 어긋나면 그 열차는 다음 열차일 가능성이 크다. 원래 열차를 계속 기다린다(리뷰 3라운드).
     const c = closest(candidates, a => picksAt + a.etaSec * 1000, prefer)
-    return board(Math.abs(picksAt + c.etaSec * 1000 - prefer) <= 120_000 || !train ? c : train)
+    if (Math.abs(picksAt + c.etaSec * 1000 - prefer) <= 120_000 || !train) return board(c)
+    // 원래 열차를 지킨다. 옛 도착 정보를 새 조회 시각에 붙이면 예정이 30~45초씩 밀리고 다음 판단 기준도 밀렸다(리뷰 4라운드).
+    return board(train, true)
   }
   // 환승 뒤 자동 진행: 걸어서 닿을 수 있는 첫 열차를 태운다. 닿을 열차가 없으면 목록을 보인다.
   if (autoBoard && walkSec) {
@@ -1171,7 +1194,8 @@ async function showPickList(candidates: Arrival[], from: string, ln: string): Pr
   // 다시 그릴지는 열차 번호가 바뀌었는지로 정한다. 분 표기만 바뀌어도 다시 그리면 커서가 맨 위로 돌아갔다(리뷰 2라운드).
   pickShown = candidates.map(a => a.trainNo).join(',')
   if (repickFrom) {
-    items.unshift('← 타고 있음 · 계속 안내')
+    // 아직 타기 전(관측 없음)이면 '타고 있음'은 거짓이다(리뷰 4라운드)
+    items.unshift(repickFrom.fixes.length ? '← 타고 있음 · 계속 안내' : '← 기다리던 열차 · 계속 안내')
     rows.unshift('__back')
   }
   const head = () => S.listHead(Date.now(),
@@ -1190,13 +1214,18 @@ async function showPickList(candidates: Arrival[], from: string, ln: string): Pr
     await showLive(() => S.loading(Date.now(), '열차 목록을 다시 그리는 중', '', backHint(), from))
   }
 }
+// 갱신 중 표시(pickRefreshing)는 이 세대의 갱신이 끝날 때 반드시 끈다. 조회 중 탭으로 빠져나간 경우에 켜진 채 남아
+// 자동 종료를 막았다(리뷰 4라운드). 다른 세대가 켠 표시는 건드리지 않는다.
+let refreshGen = -1
 function schedulePickRefresh(gen: number, until: number): void {
   pickRefreshing = true
+  refreshGen = gen
+  const stop = () => { if (refreshGen === gen) pickRefreshing = false }
   later(async () => {
-    if (gen !== pickGen || mode !== 'pick' || busy || !picks.length || Date.now() > until) { pickRefreshing = false; return }
+    if (gen !== pickGen || mode !== 'pick' || busy || !picks.length || Date.now() > until) return stop()
     try {
       const all = await arrivals(stops[0])
-      if (gen !== pickGen || mode !== 'pick' || busy) return
+      if (gen !== pickGen || mode !== 'pick' || busy) return stop()
       const next = pickCandidates(all, repickFrom?.train?.trainNo)
       // 열차 번호가 바뀔 때만 다시 그린다(떠난 열차가 빠지거나 새 열차가 들어올 때). 도착 시각 기준도 그때만 바꾼다.
       if (next.length && next.map(a => a.trainNo).join(',') !== pickShown) {
@@ -1224,12 +1253,12 @@ function retryPick(sec: number, why: string): void {
   later(() => { pickRetrying = false; if (g === pickGen && mode === 'pick' && !busy) void pickAgain() }, sec * 1000)
 }
 
-async function board(a: Arrival): Promise<void> {
+async function board(a: Arrival, keepEta = false): Promise<void> {
   train = a
   // 틱이 다시 그리던 옛 화면(경로 요약 등)을 버린다. 자동 다시 고르기로 조회하는 동안 경로 요약이 되살아났다(리뷰 3라운드).
   current = null
   // 도착 예정은 도착 정보를 받은 시각부터 센다. 탭한 시각부터 세면 목록을 오래 볼수록 늦게 나왔다.
-  boardedAt = picksAt || Date.now()
+  if (!keepEta) boardedAt = picksAt || Date.now()
   departedAt = 0
   resume = null
   repickFrom = null
@@ -1292,11 +1321,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         // 열차가 피드에서 사라졌다. 폴링은 느려지고(pollDelay), 10분이 넘으면 멈춘다.
         // 끝없이 15초마다 조회하던 것을 막는다(리뷰 2라운드). 타기 전(자동 다시 고르기를 다 쓴 뒤)에도 같다(리뷰 3라운드 전 점검).
         if (Date.now() - heardAt > 10 * 60_000) {
-          log('train lost for 10 min, stop')
-          stopPolling()
-          mode = 'arrived'
-          rows = []
-          return showLive(() => S.notice(Date.now(), '열차 정보가 끊겼습니다', '10분 넘게 위치가 안 보입니다', '탭: 처음으로\n더블탭: 종료', leg().line))
+          return stopRide('train lost 10 min', '열차 정보가 끊겼습니다', '10분 넘게 위치가 안 보입니다')
         }
       } else if (me.status === 3 && me.station === stops[0] && !fixes.length) {
         // 전역출발: 앞 역을 떠나 출발역으로 오는 중이다. 아직 타지 않았다.
@@ -1355,27 +1380,11 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         return
       }
       lastPollFailed = true
-      if (e instanceof QuotaError) {
-        stopPolling()
-        mode = 'arrived'
-        rows = []
-        return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY}`, '탭: 처음으로\n더블탭: 종료'))
-      }
-      if (e instanceof ApiError) {
-        // 한도 소진 같은 것은 기다려도 낫지 않는다. 숨기지 않고 말한다.
-        stopPolling()
-        mode = 'arrived'
-        rows = []
-        return showLive(() => S.notice(Date.now(), e.message, '자정에 초기화됩니다', '탭: 처음으로\n더블탭: 종료'))
-      }
-      if (e instanceof ConfigError || serverDown()) {
-        log('server down, stop polling', e instanceof ConfigError ? 'config' : 'no response 10 min')
-        stopPolling()
-        mode = 'arrived'
-        rows = []
-        return showLive(() => S.notice(Date.now(), e instanceof ConfigError ? e.message : '서버 응답이 없습니다',
-          e instanceof ConfigError ? '앱을 다시 설치하세요' : '10분 넘게 받지 못해 멈췄습니다', '탭: 처음으로\n더블탭: 종료'))
-      }
+      // 기다려도 낫지 않는 오류(한도, 키, 토큰)는 바로, 일시 오류는 10분 이어지면 멈춘다. 숨기지 않고 말한다.
+      if (e instanceof QuotaError) return stopRide('quota', e.message, `오늘 ${used}/${QUOTA_DAY} · 자정에 초기화`)
+      if (e instanceof ApiError) return stopRide(`api ${e.code}`, e.message, apiErrorNote(e))
+      if (e instanceof ConfigError) return stopRide('config', e.message, CONFIG_NOTE)
+      if (serverDown()) return stopRide('server down 10 min', '서버 응답이 없습니다', '10분 넘게 받지 못해 멈췄습니다')
     }
     await render()
     // 모아 둔 진단 기록을 조회 직후에 보낸다. 통신을 따로 깨우지 않는다(리뷰 1라운드).

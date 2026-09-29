@@ -180,6 +180,8 @@ const page = (body: (string | null)[], tail: (string | null)[]) => {
   const t = lay(tail)
   const b = lay(body)
   const room = MAX_LINES - t.length
+  // 머리줄 아래 빈 줄을 먼저 버린다. 아래부터 버리면 역 이름 묶음과 설명이 붙어 위계가 무너졌다(리뷰 4라운드).
+  if (b.length > room && b[1] === '') b.splice(1, 1)
   for (let i = b.length - 1; b.length > room && i > 0; i--) if (b[i] === '') b.splice(i, 1)
   while (b.length < room) b.push('')
   return [...b, ...t].join('\n')
@@ -299,14 +301,16 @@ export function alight(a: {
   const verb = a.then ? '갈아타세요' : '내리세요'
   const title = a.stopsLeft <= 1 ? `다음 역에서 ${verb}` : `두 정거장 뒤 ${verb}`
   const soon = a.arriveAt - a.now < 30_000
-  const est = a.estimated ? ' (추정)' : ''
+  // 추정이면 시각 앞에 '약'. 줄 끝의 ' (추정)'은 7칸을 더해 다음 역 이름이 길면 줄이 둘로 나뉘었고,
+  // 추정이 켜지고 꺼질 때마다 화면이 뛰었다(리뷰 4라운드).
+  const at = `${a.estimated && !soon ? '약 ' : ''}${when(a.now, a.arriveAt)}`
   // 도착 시각은 바로 위 큰 역 이름(하차역)의 시각이다. '다음 자양 · 약 3분'은 3분이 자양까지로 읽혔다(리뷰 3라운드).
   // 그래서 시각을 앞에 두고 다음 역을 뒤에 둔다. 넘치면 구분점 없이 두 줄.
-  // 신호가 끊겼으면 '(추정)'과 끊김을 한 줄로 합친다. 두 줄이면 역 이름 묶음 아래 빈 줄이 사라졌다(리뷰 3라운드).
-  const detail = soon && a.stopsLeft <= 1 ? [`${PAD}곧 도착 · 문 쪽으로 이동하세요`]
-    : a.seenMin ? [`${PAD}${when(a.now, a.arriveAt)} 도착 · 신호 끊김 ${a.seenMin}분`]
-    : a.stopsLeft <= 1 ? [`${PAD}${hhmm(a.arriveAt)} 도착 예정${est}`]
-    : joinOrSplit(`${when(a.now, a.arriveAt)} 도착`, `다음 ${a.next}${est}`)
+  // 신호가 끊겼으면 끊김을 같은 줄에 둔다. 예정이 지나도 끊김은 남긴다(리뷰 4라운드: '곧 도착'이 끊김을 지웠다).
+  const detail = a.seenMin ? [`${PAD}${at} 도착 · 신호 끊김 ${a.seenMin}분`]
+    : soon && a.stopsLeft <= 1 ? [`${PAD}곧 도착 · 문 쪽으로 이동하세요`]
+    : a.stopsLeft <= 1 ? [`${PAD}${at} 도착 예정`]
+    : joinOrSplit(`${at} 도착`, `다음 ${a.next}`)
   // 강조 블록: 역 이름과 그에 붙는 한 줄은 IN. 나머지 설명은 PAD. 하차·환승·도착 화면 공통.
   return page([head(a.now, a.note ?? (a.then ? '환승' : '하차')), '', `${PAD}${title}`, '',
     `${IN}${hero(a.dest, 6)}`, a.then ? `${IN}${ro(a.then)} 환승` : null, '', ...detail],
@@ -398,5 +402,6 @@ export function route(a: {
 
 // 안내와 오류. 어떤 화면에서든 탭으로 빠져나갈 수 있어야 한다.
 export function notice(now: number, title: string, body: string, hint: string, ctx = ''): string {
-  return page([fitHead(now, ctx), '', `${PAD}${title}`, '', body ? `${PAD}${body}` : null], hints(hint))
+  // 본문이 여러 줄이면 줄마다 들여쓴다. 둘째 줄이 0칸에서 시작했다(리뷰 4라운드).
+  return page([fitHead(now, ctx), '', `${PAD}${title}`, '', ...(body ? body.split('\n').map(l => `${PAD}${l}`) : [])], hints(hint))
 }

@@ -14,6 +14,8 @@ const ok = (s: string, what: string) => {
   // 진행 띠의 생략 표시 '··'는 글리프라 뺀다
   for (const l of s.split('\n')) assert.ok(!/^\s*·(?!·)|(?<!·)·\s*$/.test(l), `${what}: 줄 머리·끝에 '·'\n${s}`)
   // 줄바꿈이 옮길 수 없는 한 어절 줄을 만들면 안 된다(리뷰 3라운드)
+  // 빈 줄이 아니면 두 칸 이상 들여쓴다(리뷰 4라운드: 여러 줄 본문의 둘째 줄이 0칸에서 시작했다)
+  for (const l of s.split('\n')) assert.ok(l === '' || l.startsWith('  '), `${what}: 들여쓰기 없는 줄 '${l}'\n${s}`)
   const widows = S.layStats.widows
   S.layStats.widows = 0
   assert.equal(widows, 0, `${what}: 한 어절만 남은 줄\n${s}`)
@@ -151,7 +153,13 @@ test('alight는 남은 정거장에 따라 말을 바꾸고, 문장에는 자간
   assert.ok(two.includes('18:46 도착 · 다음 중계'), two)   // 시각은 하차역(하계) 도착, 다음 역은 뒤에
   // 신호가 끊기면 추정과 끊김을 한 줄로 합친다. 역 이름 묶음 아래 빈 줄이 남는다
   const lost = S.alight({ now: T, stopsLeft: 2, dest: '태릉입구', next: '석계', arriveAt: T + 240_000, then: '7호선', refresh: R, estimated: true, seenMin: 4 })
-  assert.ok(lost.includes('18:46 도착 · 신호 끊김 4분') && lost.includes('환승\n\n'), lost)
+  assert.ok(lost.includes('약 18:46 도착 · 신호 끊김 4분') && lost.includes('환승\n\n'), lost)
+  // 예정이 지나도 끊김 표시는 남는다(리뷰 4라운드: '곧 도착'이 끊김을 지웠다)
+  const late = S.alight({ now: T, stopsLeft: 1, dest: '청담', next: '청담', arriveAt: T - 60_000, refresh: R, estimated: true, seenMin: 4 })
+  assert.ok(late.includes('곧 도착 · 신호 끊김 4분'), late)
+  // 추정은 줄 끝 '(추정)'이 아니라 시각 앞 '약'
+  const guess = S.alight({ now: T, stopsLeft: 2, dest: '청담', next: '건대입구', arriveAt: T + 240_000, refresh: R, estimated: true })
+  assert.ok(guess.includes('약 18:46 도착 · 다음 건대입구') && !guess.includes('(추정)'), guess)
   // 도착 예정이 지났으면 지난 시각 대신 행동을 말한다
   assert.ok(S.alight({ now: T, stopsLeft: 1, dest: '하계', next: '중계', arriveAt: T - 5000, refresh: R }).includes('곧 도착'))
   assert.ok(!two.replace(/ /g, '').includes('다음다음'), '어색한 말이 남아 있습니다')
@@ -282,6 +290,11 @@ test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', asyn
     ok(S.transfer({ now: T, station: n, from: '9호선', to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n }), `transfer 반대 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R }), `alight 환승 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R, estimated: true, seenMin: 12 }), `alight 끊김 환승 ${n}`)
+    // 추정·환승·긴 역 이름을 함께: 역 이름 묶음('…환승')과 설명 사이 빈 줄이 남아야 한다(리뷰 4라운드)
+    const est = S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R, estimated: true })
+    ok(est, `alight 추정 환승 ${n}`)
+    const ls = est.split('\n'), i = ls.findIndex(l => l.includes('도착'))
+    assert.equal(ls[i - 1], '', `alight 추정 환승 ${n}: 설명 위 빈 줄이 없다\n${est}`)
     ok(S.alight({ now: T, stopsLeft: 1, dest: n, next: n, arriveAt: T + 120_000, refresh: R, estimated: true, seenMin: 12 }), `alight 끊김 ${n}`)
     ok(S.waiting({ now: T, line, toward: n, at: `${n} 출발`, away: '12정거장 전', from: n, arriveAt: T + 300_000, refresh: R }), `waiting ${n}`)
     ok(S.lost({ now: T, last: n, agoSec: 200, guess: n, dest: n, stopsLeft: 12, bar: S.track(13, 3, 2), refresh: R }), `lost ${n}`)
