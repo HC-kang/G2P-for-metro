@@ -31,6 +31,6 @@ shot(){ curl -s -m 5 -o "$SHOTS/$1.png" $S/api/screenshot/glasses; echo "  [$1]"
 webshot(){ curl -s -m 5 -o "$SHOTS/$1.png" $S/api/screenshot/webview; echo "  [$1 phone]"; }
 enc(){ python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$1"; }
 # launch "도착지1,도착지2" [추가 쿼리]
-launch(){ pkill -f "evenhub-simulator" 2>/dev/null; sleep 1; nohup npx evenhub-simulator --automation-port 9898 "http://localhost:5173/?gps=dev&api=dev&host=ios&dests=$(enc "$1")${2:+&$2}" > /tmp/metro-sim.log 2>&1 & sleep 9; }
+launch(){ pkill -f "automation-port 9898" 2>/dev/null; sleep 1; nohup npx evenhub-simulator --automation-port 9898 "http://localhost:5173/?gps=dev&api=dev&host=ios&dests=$(enc "$1")${2:+&$2}" > /tmp/metro-sim.log 2>&1 & sleep 9; }
 dev(){ grep -a '\[device\]' /tmp/metro-dev.log; }
 consoleErrors(){ curl -s -m 3 $S/api/console | python3 -c 'import sys,json;print(sum(1 for m in json.load(sys.stdin)["entries"] if m["level"]=="error"))'; }

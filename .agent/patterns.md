@@ -115,3 +115,4 @@ dev server 로그(`/__log`)는 같은 Wi-Fi에서만 받으므로 지하철에 �
 - 갱신: 사용자가 Orca 내장 브라우저에 Even Hub를 로그인한 채 열어 두면 `orca tab list --worktree all --json`으로 탭을 찾고 `--page <browserPageId>`로 snapshot/click/upload를 한다. 업로드 입력은 `orca upload --element <ref> --files <path>`. 올린 뒤 Build details의 크기를 `out.ehpk`와 대조한다.
 - 2026-09-26: v0.4.2가 Hub에 올라갔다(78.7 KB, out.ehpk 78,705바이트와 일치).
 - 갱신(0.4.3): Even Hub의 파일 입력은 숨겨져 있어 스냅샷 ref가 없다. `orca exec --page <id> --command "upload input[type=file] <절대경로>"`로 넣는다. 그러면 Create build 창에 버전·크기가 뜨고, Change log를 채운 뒤 `Add build`를 누른다. 목록에 새 버전이 뜨는지 확인한다.
+- 병렬 시뮬레이터 시험(2026-09-30): 저장소를 스크래치 사본으로 rsync(node_modules는 심볼릭 링크, `.env.local`에서 `VITE_LOG_REPORT` 삭제), 사본마다 `npx vite --port 517N --strictPort`, 시뮬레이터는 `--automation-port 990N`. 사본마다 `.dev/` 피드가 따로라 서로 섞이지 않는다. 시뮬레이터 네 대 동시 실행 확인. 스크립트: 스크래치패드 `endlib.sh`, `run1~3.sh`, `capture4.sh`.

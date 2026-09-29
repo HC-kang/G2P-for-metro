@@ -78,6 +78,7 @@ window.addEventListener('shadow-timer:tick', e => {
 every(() => {
   if (!writes) return
   log('ble writes/min', writes, 'bytes', writeBytes, 'mode', mode, 'sec', S.clock.seconds)
+  allWrites += writes; allBytes += writeBytes
   writes = writeBytes = 0
 }, 60_000)
 const shadowLog = every(() => {
@@ -129,7 +130,7 @@ const listOf = (items: string[], head?: string) => ({
 let pageIsText = false
 // 마지막으로 안경에 쓴 텍스트. 같으면 다시 쓰지 않는다. 쓰기 횟수와 바이트는 1분마다 기록한다(리뷰: 수치가 없다).
 let lastWritten = ''
-let writes = 0, writeBytes = 0
+let writes = 0, writeBytes = 0, allWrites = 0, allBytes = 0
 
 // 반환값을 확인한다. tiro는 이것을 빼먹어 화면이 멈췄다.
 async function show(content: string): Promise<void> {
@@ -585,6 +586,7 @@ let pollTimer: ReturnType<typeof setTimeout> | null = null
 let pollGen = 0
 // 연속으로 열차를 못 찾은 횟수. 한 번 놓친 것으로 오류 화면을 띄우지 않는다.
 let misses = 0
+let heardAt = 0   // 고른 열차를 피드에서 마지막으로 본(또는 추적을 시작한) 시각
 
 // 환승 1회에 걸리는 시간. 실측 전 추정값이다. 화면에는 '약'을 붙여 보여준다.
 const TRANSFER_MIN = 4
@@ -616,7 +618,7 @@ const FAST_POLL = !!import.meta.env?.DEV && new URLSearchParams(location.search)
 const MOCK_API = !!import.meta.env?.DEV && new URLSearchParams(location.search).get('api') === 'dev'
 function pollDelay(): number {
   if (FAST_POLL) return 5_000
-  if (fixes.length && misses >= 4) return POLL_SLOWEST_MS   // 탄 열차가 한동안 안 보인다. 아껴 가며 기다린다
+  if (misses >= 4) return POLL_SLOWEST_MS   // 고른 열차가 한동안 안 보인다. 아껴 가며 기다린다
   return used >= 850 ? POLL_SLOWEST_MS : used >= 700 ? POLL_SLOW_MS : POLL_MS
 }
 const leg = () => trip!.legs[legIndex]
@@ -640,7 +642,7 @@ const RECENT_ARRIVAL_MS = 20 * 60_000
 // 묵은 위치에서 '약 879m'는 정밀하지 않은 값을 정밀하게 보이게 한다. 100m 단위로 반올림한다(리뷰 2라운드).
 const dist = (m: number, rough: boolean): string =>
   m < 100 ? (rough ? '근처' : '바로 앞')
-    : rough ? `약 ${m < 1000 ? `${Math.round(m / 100) * 100}m` : `${(m / 1000).toFixed(1)}km`}`
+    : rough ? `약 ${m < 950 ? `${Math.round(m / 100) * 100}m` : `${(m / 1000).toFixed(1)}km`}`   // 950m 이상은 '1000m'가 아니라 '1.0km'
     : m < 1000 ? `${m}m` : `${(m / 1000).toFixed(1)}km`
 const ORIGIN_WATCH_MS = 180_000
 
@@ -811,6 +813,7 @@ async function resumeTrip(r: Resume): Promise<void> {
     mode = 'riding'
     menuOpen = false
     stopPolling()
+    heardAt = Date.now()
     nextPollAt = Date.now()
     schedulePoll(pollGen, 0, 'resume')
     return render()
@@ -826,9 +829,14 @@ const snapshot = (): Resume => ({
 // 주행 중에 열차를 다시 고르러 가면(놓침 탭, 메뉴) 지금 추적을 남겨 둔다. 목록 맨 위 '← 타고 있음 · 계속 안내',
 // 더블탭, 또는 20초 동안 아무것도 안 고르면 그대로 돌아온다. 실수 탭으로 하차 안내를 잃지 않는다(리뷰 2라운드).
 async function repick(why: string): Promise<void> {
-  repickFrom = snapshot()
+  const snap = repickFrom = snapshot()
   log('repick', why)
   stopPolling()
+  // 출발 직후의 탭 한 번은 실수일 수 있다(안경을 고쳐 쓰다 누름). 9초 안에 아무것도 안 고르면 원래 추적으로 돌아간다.
+  // 메뉴에서 일부러 고른 '열차 다시 고르기'는 돌아가지 않는다. 목록 커서 이동은 앱에 알려지지 않으므로
+  // 머리줄에 초읽기를 둔다('9초 뒤 복귀'. 두 자리 초는 32칸을 넘어 20초에서 9초로 줄였다).
+  repickUntil = why === 'missed train' ? Date.now() + 9_000 : 0
+  if (repickUntil) later(() => { if (repickFrom === snap && mode === 'pick' && !busy) void backToRide('timeout') }, 9_000)
   return showPick(false)
 }
 async function backToRide(why: string): Promise<void> {
@@ -846,7 +854,7 @@ async function showOrigin(intentional = false): Promise<void> {
     // 같은 여정을 또 나가면 5분을 새로 주지 않는다
     resume = resume && resume.trip === base.trip ? { ...base, at: resume.at } : base
     log('left trip, resumable', resume.mode, trip.to)
-  } else if (intentional) resume = null
+  } else if (intentional) { resume = null; ride = null }
   repickFrom = null
   mode = 'origin'
   trip = null
@@ -967,7 +975,7 @@ async function chooseRoute(dest: string): Promise<void> {
     options.map(p => `${head(p)}  ${tripMinutes(p)}분`),
   )
   log('options', items.join(' / '))
-  if (!(await showList(items, () => S.listHead(Date.now(), `${origin} → ${dest}`, `→ ${dest}`, '경로')))) {
+  if (!(await showList(items, () => S.listHead(Date.now(), `${origin} → ${dest}`, `${origin}→${dest}`, `→ ${dest}`, '경로')))) {
     rows = []
     await showLive(() => S.notice(Date.now(), '노선 목록을 표시하지 못했습니다', '', '탭: 도착지 다시 고르기'))
   }
@@ -1089,8 +1097,6 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0): Promise<v
   await showPickList(candidates, from, ln)
   // 목록을 보는 동안 20초마다 다시 조회한다. 떠난 열차는 빠지고 새 열차가 들어온다. 10분 뒤에는 멈춘다(조회 예산).
   schedulePickRefresh(gen, Date.now() + 10 * 60_000)
-  // 주행 중에 다시 고르러 왔는데 20초 동안 아무것도 안 고르면 원래 추적으로 돌아간다(실수 탭 대비).
-  if (repickFrom) later(() => { if (gen === pickGen && mode === 'pick' && repickFrom && !busy) void backToRide('timeout') }, 20_000)
 }
 
 // 같은 노선, 같은 방향만. 방향은 "…방면" 역이 다음 역과 같은지로 가른다. updnLine은 읽지 않는다.
@@ -1111,6 +1117,7 @@ const pickLabel = (a: Arrival, level: number) => {
   return level === 0 ? `${at}  ${a.toward} 방면 · ${a.dest}행${tail}` : level === 1 ? `${at}  ${a.toward} 방면${tail}` : `${at}  ${a.toward} 방면`
 }
 let pickShown = ''
+let repickUntil = 0
 async function showPickList(candidates: Arrival[], from: string, ln: string): Promise<void> {
   picks = candidates
   rows = candidates.map(a => a.trainNo)
@@ -1121,7 +1128,9 @@ async function showPickList(candidates: Arrival[], from: string, ln: string): Pr
     items.unshift('← 타고 있음 · 계속 안내')
     rows.unshift('__back')
   }
-  if (!(await showList(items, () => S.listHead(Date.now(), `${from} ${ln}`, ln)))) {
+  const head = () => S.listHead(Date.now(),
+    ...(repickFrom && repickUntil > Date.now() ? [`${Math.ceil((repickUntil - Date.now()) / 1000)}초 뒤 복귀`] : []), `${from} ${ln}`, ln)
+  if (!(await showList(items, head))) {
     rows = []
     retryPick(FAST_POLL ? 5 : 15, 'list failed')
     await showLive(() => S.loading(Date.now(), '열차 목록을 다시 그리는 중', '', '더블탭: 뒤로', from))
@@ -1179,13 +1188,15 @@ async function board(a: Arrival): Promise<void> {
   menuOpen = false
   mode = 'riding'
   log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
-  void logBattery('boarded')
+  const r = ride ??= { at: Date.now(), used, writes: allWrites + writes, bytes: allBytes + writeBytes }
+  void logBattery('boarded').then(b => { r.battery ??= b })
   await show(S.waiting({
     now: Date.now(), line: leg().line, toward: a.dest || a.toward,
     at: '', from: stops[0], arriveAt: boardedAt + a.etaSec * 1000, refresh: refresh(), hint: hintNow(),
   }))
   stopPolling()
   misses = 0
+  heardAt = Date.now()
   nextPollAt = Date.now()
   // 탭 핸들러 안에서는 busy라 poll이 조회를 건너뛴다. 실기기에서 첫 조회가 20초 늦었다. 핸들러가 끝난 직후에 돈다.
   schedulePoll(pollGen, 0, 'boarded')
@@ -1209,6 +1220,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
       if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
       lastPollFailed = false
       showFails = 0
+      if (me) heardAt = Date.now()
       if (!me) {
         misses += 1
         log('train not in feed', train!.trainNo, 'misses', misses)
@@ -1219,10 +1231,9 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
           stopPolling()
           return showPick(true)
         }
-        // 탄 뒤에 열차가 피드에서 사라졌다. 폴링은 느려지고(pollDelay), 10분이 넘으면 멈춘다.
-        // 끝없이 15초마다 조회하던 것을 막는다(리뷰 2라운드).
-        const lastFix = fixes[fixes.length - 1]
-        if (lastFix && Date.now() - (lastFix.seen ?? lastFix.at) > 10 * 60_000) {
+        // 열차가 피드에서 사라졌다. 폴링은 느려지고(pollDelay), 10분이 넘으면 멈춘다.
+        // 끝없이 15초마다 조회하던 것을 막는다(리뷰 2라운드). 타기 전(자동 다시 고르기를 다 쓴 뒤)에도 같다(리뷰 3라운드 전 점검).
+        if (Date.now() - heardAt > 10 * 60_000) {
           log('train lost for 10 min, stop')
           stopPolling()
           mode = 'arrived'
@@ -1491,7 +1502,7 @@ async function arrive(): Promise<void> {
   }
   mode = 'arrived'
   resume = null
-  void logBattery('arrived')
+  void logBattery('arrived').then(rideSummary)
   lastArrived = stops[stops.length - 1]
   lastArrivedAt = Date.now()
   void bridge.setLocalStorage('lastArrived', `${lastArrived}\t${lastArrivedAt}`)
@@ -1688,13 +1699,26 @@ const idleTimer = every(() => {
 }, 30_000)
 
 // 안경 배터리를 주행 중 5분마다 남긴다. 한 시간 주행의 %/h를 실제 로그로 잰다(리뷰 1라운드: 수치가 없다).
-async function logBattery(why: string): Promise<void> {
+async function logBattery(why: string): Promise<number | undefined> {
   try {
     const st = (await bridge.getDeviceInfo())?.status
     log('battery', why, 'glasses', st?.batteryLevel ?? '?', st?.isCharging ? 'charging' : '', 'wearing', st?.isWearing ?? '?')
+    return st?.isCharging ? undefined : st?.batteryLevel
   } catch (e) {
     log('battery failed', e)
   }
+}
+// 주행 한 번의 요약을 도착 때 한 줄로 남긴다. 첫 실제 출근에서 안경 배터리 %/h·요청·쓰기 수치가 바로 나온다(리뷰 3라운드).
+// ponytail: 첫 탑승부터 도착까지 하나로 센다. 여정을 버리고 새 여정을 타면 둘이 합쳐진다. 따로 셀 일이 생기면 startTrip에서 비운다.
+let ride: { at: number, used: number, writes: number, bytes: number, battery?: number } | null = null
+function rideSummary(end: number | undefined): void {
+  const r = ride
+  ride = null
+  if (!r) return
+  const min = (Date.now() - r.at) / 60_000
+  const perHour = r.battery != null && end != null && min >= 10 ? ((r.battery - end) / min * 60).toFixed(1) : '?'
+  log('ride summary', 'min', min.toFixed(1), 'req', used - r.used, 'writes', allWrites + writes - r.writes,
+    'bytes', allBytes + writeBytes - r.bytes, 'battery', r.battery ?? '?', '->', end ?? '?', '%/h', perHour, 'sec', S.clock.seconds)
 }
 every(() => { if (mode === 'riding' || mode === 'transfer') void logBattery('ride') }, 5 * 60_000)
 
