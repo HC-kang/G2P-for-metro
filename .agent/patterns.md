@@ -116,3 +116,6 @@ dev server 로그(`/__log`)는 같은 Wi-Fi에서만 받으므로 지하철에 �
 - 2026-09-26: v0.4.2가 Hub에 올라갔다(78.7 KB, out.ehpk 78,705바이트와 일치).
 - 갱신(0.4.3): Even Hub의 파일 입력은 숨겨져 있어 스냅샷 ref가 없다. `orca exec --page <id> --command "upload input[type=file] <절대경로>"`로 넣는다. 그러면 Create build 창에 버전·크기가 뜨고, Change log를 채운 뒤 `Add build`를 누른다. 목록에 새 버전이 뜨는지 확인한다.
 - 병렬 시뮬레이터 시험(2026-09-30): 저장소를 스크래치 사본으로 rsync(node_modules는 심볼릭 링크, `.env.local`에서 `VITE_LOG_REPORT` 삭제), 사본마다 `npx vite --port 517N --strictPort`, 시뮬레이터는 `--automation-port 990N`. 사본마다 `.dev/` 피드가 따로라 서로 섞이지 않는다. 시뮬레이터 네 대 동시 실행 확인. 스크립트: 스크래치패드 `endlib.sh`, `run1~3.sh`, `capture4.sh`.
+- 2026-09-30: v0.5.1이 Hub에 올라갔다(85.5 KB, out.ehpk 85,493바이트와 일치). 순서: `orca click`으로 'Upload a build'를 먼저 눌러야 파일 입력이 생긴다 → `orca exec … "upload input[type=file] <경로>"` → Change log `fill` → 'Add build' → 목록 맨 위 버전 확인.
+- 패키징: `evenhub pack`은 --sdk-ver가 없으면 npm 최신 SDK의 min_app_version을 찍는다. package.json pack에 `--sdk-ver 0.0.15`를 넣었다. SDK 0.0.15 하한은 2.2.10이다.
+- 장애 주입: 모사 API는 `.dev/fault.json` {"status":502}|{"hang":true}|{"drop":true}를 따른다(vite.config.ts). 시험 스크립트 스크래치패드 run6.sh(주행), run7.sh(고르기).
