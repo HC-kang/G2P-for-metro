@@ -133,3 +133,6 @@ export function altArrivalNames(station: string): string[] {
   if (dotted !== station) out.push(dotted)
   return out
 }
+
+// 역 데이터를 만든 날(KST). 폰 화면에 보인다.
+export const DATA_DATE: string = (data as { updatedAt?: string }).updatedAt ?? ''

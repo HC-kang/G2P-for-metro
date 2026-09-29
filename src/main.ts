@@ -15,7 +15,7 @@ import {
   CreateStartUpPageContainer, RebuildPageContainer, TextContainerUpgrade, OsEventTypeList,
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
-import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
+import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
 import { plan, planHop, departures, locate, legEta, hops, paceMs, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setReporting, setRequestGuard, ApiError, type Arrival } from './api.ts'
@@ -451,6 +451,7 @@ renderTrail()
 // 버전은 app.json에서 온다. 패키징되는 값과 같아야 문의가 왔을 때 대조할 수 있다.
 $('#version').textContent =
   `${import.meta.env?.VITE_APP_NAME ?? 'Metro'} ${import.meta.env?.VITE_APP_VERSION ?? ''}`.trim()
+  + (DATA_DATE ? ` · 역 데이터 ${DATA_DATE} 기준` : '')
   + (REPORTING ? ` · 세션 ${SESSION}` : '')
 
 // 설정: 초 단위 시계, 진단 기록 자동 보고. 폰 저장소에 둔다.

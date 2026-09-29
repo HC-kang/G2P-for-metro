@@ -227,11 +227,12 @@ export function riding(a: {
     '',
     `${PAD}다음   ${hero(a.next, 9)}`,
     `${PAD}${track(a.pathLen, a.index, a.estimated)}`,
+    // 환승이 있으면 두 줄로 줄인다. 세 줄이면 10줄 한도에 걸려 빈 줄이 빠지고 위계가 무너졌다(리뷰 2라운드 준비).
+    // 환승까지 남은 시간과 역 수(사용자 요구)는 첫 줄, 갈아탈 노선과 최종 도착은 둘째 줄.
     ...(a.transfer
       ? [
-          ...pair(a.legDest, `${when(a.now, a.legAt)} 환승`),
-          `${PAD}${a.stopsLeft}정거장 · ${ro(a.transfer.line)}`,
-          ...pair(a.transfer.finalDest, `${hhmm(a.transfer.finalAt)} 도착`),
+          ...pair(`${a.legDest} 환승 ${when(a.now, a.legAt)}`, `· ${a.stopsLeft}정거장`),
+          ...pair(`→ ${a.transfer.line} ·`, `${a.transfer.finalDest} ${hhmm(a.transfer.finalAt)} 도착`),
         ]
       : [
           ...pair(a.legDest, `${when(a.now, a.legAt)} 도착`),

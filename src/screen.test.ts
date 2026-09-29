@@ -124,9 +124,9 @@ test('riding은 추정 구간임을 밝힌다', () => {
 
 test('riding은 환승이 있으면 환승과 최종 도착을 보여준다', () => {
   const s = riding({ transfer: { line: '3호선', finalDest: '강남', finalAt: T + 22 * 60_000 } })
-  assert.ok(s.includes('교대 18:50 환승'), s)
-  assert.ok(s.includes('3호선으로'), s)
-  assert.ok(s.includes('강남 19:04 도착'), s)          // 18:42 + 22분
+  assert.ok(s.includes('교대 환승 18:50 · 4정거장'), s)
+  assert.ok(s.includes('→ 3호선 · 강남 19:04 도착'), s)          // 18:42 + 22분
+  assert.ok(s.split('\n').includes(''), '빈 줄이 남아 위계가 선다')
   ok(s, 'riding 환승')
 })
 

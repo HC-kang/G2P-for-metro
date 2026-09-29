@@ -230,5 +230,7 @@ if (RT_KEY) {
   console.warn('SEOUL_RT_KEY가 없어 도착 API 표기 표를 만들지 못했습니다.')
 }
 
-writeFileSync('src/stations.json', JSON.stringify({ lines, stations, coords, arrivalNames, altNames, noTransfer }))
+// updatedAt: 폰 화면에 '역 데이터 기준일'로 보인다. 역 개명·신설을 늦게 알아챈 적이 있다(뚝섬유원지→자양).
+const updatedAt = new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)
+writeFileSync('src/stations.json', JSON.stringify({ lines, stations, coords, arrivalNames, altNames, noTransfer, updatedAt }))
 console.log(`역 ${stations.length}개, 노선 이름 ${lineNames.length}개, 노선 ID ${lines.length}개를 저장했습니다.`)
