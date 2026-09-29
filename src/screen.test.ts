@@ -15,13 +15,13 @@ const ok = (s: string, what: string) => {
 const riding = (over: Partial<Parameters<typeof S.riding>[0]> = {}) => S.riding({
   now: T, line: '2호선', at: { station: '삼성', label: '출발' }, refresh: R,
   next: '역삼', legDest: '교대',
-  stopsLeft: 4, paceMs: 120_000, pathLen: 7, index: 3, estimated: 0, ...over,
+  stopsLeft: 4, paceMs: 120_000, pathLen: 7, index: 3, estimated: 0, legAt: T + 8 * 60_000, ...over,
 })
 
-const waiting = () => S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산', from: '노원', etaSec: 180, refresh: R })
+const waiting = () => S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산 출발 · 2정거장 전', from: '노원', arriveAt: T + 180_000, refresh: R })
 const transfer = () => S.transfer({ now: T, station: '교대', from: '2호선', to: '3호선', toward: '경복궁', rest: 3, minutes: 10, finalDest: '안국' })
 const lost = () => S.lost({ now: T, last: '선릉', agoSec: 52, guess: '역삼', dest: '강남', stopsLeft: 3, bar: S.track(6, 3, 2), refresh: R })
-const alight = (n: number) => S.alight({ now: T, stopsLeft: n, dest: '하계', next: '중계', minutes: n * 2 })
+const alight = (n: number) => S.alight({ now: T, stopsLeft: n, dest: '하계', next: '중계', arriveAt: T + n * 2 * 60_000, refresh: R })
 
 test('bytes와 cols', () => {
   assert.equal(S.bytes('가'), 3)
@@ -89,19 +89,19 @@ test('rows는 한도를 넘으면 글자를 자르지 않고 곁가지를 버린
   assert.ok(out.every(r => !r.includes('환') || r.includes('환승')), out[0])
 })
 
-test('track은 관측, 추정, 남은 역, 하차역을 그린다', () => {
-  assert.equal(S.track(6, 3, 0), '●●●●○◎')
-  assert.equal(S.track(6, 3, 2), '●●◌◌○◎')   // index=3, estimated=2 → 2·3번 칸이 추정
-  assert.equal(S.track(6, 0, 0), '●○○○○◎')
+test('track은 지나옴, 지금(관측·추정), 남은 역, 하차역을 그린다', () => {
+  assert.equal(S.track(6, 3, 0), '●●●▶○◎')
+  assert.equal(S.track(6, 3, 2), '●●◌▷○◎')   // index=3, estimated=2 → 지금은 추정(▷), 그 앞 한 칸도 추정으로 지나옴
+  assert.equal(S.track(6, 0, 0), '▶○○○○◎')
   const bar = S.track(30, 20, 0, 10)
-  assert.ok(bar.startsWith('─') && bar.endsWith('◎') && bar.length === 10, bar)
-  // 긴 구간 초반에도 지금 위치가 보여야 한다. 예전에는 '─○○○○○○○○◎'만 보였다.
-  assert.equal(S.track(12, 2, 1), '─●◌○○○○○─◎')
-  assert.equal(S.track(12, 0, 0), '●○○○○○○○─◎')
-  assert.equal(S.track(12, 10, 0), '─●●●●●●●●◎'.slice(0, 1) + '●'.repeat(8) + '◎')
+  assert.ok(bar.startsWith('··') && bar.endsWith('◎') && S.cols(bar) === 20, bar)
+  // 긴 구간 초반에도 지금 위치가 보여야 한다. 줄인 자리는 ─가 아니라 ··다(─는 갱신 막대와 겹쳤다).
+  assert.equal(S.track(12, 2, 1), '··●▷○○○○○··◎')
+  assert.equal(S.track(12, 0, 0), '▶○○○○○○○··◎')
+  assert.equal(S.track(12, 10, 0), '··●●●●●●●▶◎')
   for (let i = 0; i < 29; i++) {
     const b = S.track(30, i, 0)
-    assert.ok([...b].length === 10 && b.endsWith('◎') && b.includes('●'), `${i}: ${b}`)
+    assert.ok(S.cols(b) === 20 && b.endsWith('◎') && b.includes('▶'), `${i}: ${b}`)
   }
 })
 
@@ -123,18 +123,21 @@ test('riding은 추정 구간임을 밝힌다', () => {
 })
 
 test('riding은 환승이 있으면 환승과 최종 도착을 보여준다', () => {
-  const s = riding({ transfer: { line: '3호선', finalDest: '강남', finalMinutes: 22 } })
+  const s = riding({ transfer: { line: '3호선', finalDest: '강남', finalAt: T + 22 * 60_000 } })
   assert.ok(s.includes('교대 18:50 환승'), s)
   assert.ok(s.includes('3호선으로'), s)
   assert.ok(s.includes('강남 19:04 도착'), s)          // 18:42 + 22분
   ok(s, 'riding 환승')
 })
 
-test('alight는 남은 정거장에 따라 말을 바꾼다', () => {
+test('alight는 남은 정거장에 따라 말을 바꾸고, 문장에는 자간을 벌리지 않는다', () => {
   const two = alight(2), one = alight(1)
-  assert.ok(two.includes('두  정 거 장  뒤'), two)
-  assert.ok(one.includes('다 음 역 에 서  내 립 니 다'), one)
-  assert.ok(one.includes('18:44 도착'), one)
+  assert.ok(two.includes('두 정거장 뒤 내리세요'), two)
+  assert.ok(one.includes('다음 역에서 내리세요'), one)
+  assert.ok(one.includes('18:44 도착 예정'), one)
+  assert.ok(two.includes('다음 중계 · 하계까지 약 4분'), two)
+  // 도착 예정이 지났으면 지난 시각 대신 행동을 말한다
+  assert.ok(S.alight({ now: T, stopsLeft: 1, dest: '하계', next: '중계', arriveAt: T - 5000, refresh: R }).includes('곧 도착'))
   assert.ok(!two.replace(/ /g, '').includes('다음다음'), '어색한 말이 남아 있습니다')
   ok(two, 'alight 2')
   ok(one, 'alight 1')
@@ -154,11 +157,12 @@ test('waiting은 열차의 실제 위치와 도착 예정을 보여준다', () =
   const s = waiting()
   assert.ok(s.replace(/ /g, '').includes('수락산'), s)
   assert.ok(s.includes('18:45 도착') && s.includes('약 3분'), s)
-  // 도착 예정이 없으면 시간을 지어내지 않는다
-  const zero = S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산', from: '노원', etaSec: 0, refresh: R })
-  assert.ok(!zero.includes('도착 ·') && zero.includes('노원 도착을 기다립니다'), zero)
+  assert.ok(s.includes('수락산 출발 · 2정거장 전') && !s.includes('현재 수락산'), s)
+  // 도착 예정이 지났으면 시각을 지어내지 않는다
+  const zero = S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산 출발', from: '노원', arriveAt: T, refresh: R })
+  assert.ok(!zero.includes('도착 ·') && zero.includes('곧 도착'), zero)
   // 위치를 아직 못 받았을 때 '현재 확인 중' 같은 어색한 말이 나오면 안 된다
-  const unknown = S.waiting({ now: T, line: '7호선', toward: '장암', at: '', from: '노원', etaSec: 180, refresh: R })
+  const unknown = S.waiting({ now: T, line: '7호선', toward: '장암', at: '', from: '노원', arriveAt: T + 180_000, refresh: R })
   assert.ok(unknown.includes('위치 확인 중') && !unknown.includes('현재 '), unknown)
   ok(s, 'waiting')
 })
@@ -166,7 +170,7 @@ test('waiting은 열차의 실제 위치와 도착 예정을 보여준다', () =
 test('모든 화면이 현재시각을 밝히고 한도를 지킨다', () => {
   const screens: [string, string][] = [
     ['riding', riding()],
-    ['riding 환승', riding({ transfer: { line: '3호선', finalDest: '강남', finalMinutes: 22 } })],
+    ['riding 환승', riding({ transfer: { line: '3호선', finalDest: '강남', finalAt: T + 22 * 60_000 } })],
     ['alight2', alight(2)], ['alight1', alight(1)],
     ['arrived', S.arrived(T, '하계')],
     ['transfer', transfer()], ['waiting', waiting()], ['lost', lost()],
@@ -203,9 +207,10 @@ test('실제 경로로 만든 화면이 모두 한도를 지킨다', async () =>
     ok(riding({
       line: leg.line, at: { station: leg.stops[0], label: '출발' }, next: leg.stops[1], legDest,
       stopsLeft: leg.stops.length - 1, pathLen: leg.stops.length, index: 0,
-      transfer: p.legs[1] ? { line: p.legs[1].line, finalDest: p.to, finalMinutes: stops * 2 } : undefined,
+      legAt: T + (leg.stops.length - 1) * 120_000,
+      transfer: p.legs[1] ? { line: p.legs[1].line, finalDest: p.to, finalAt: T + stops * 120_000 } : undefined,
     }), `riding ${a}→${b}`)
-    ok(S.alight({ now: T, stopsLeft: 2, dest: legDest, next: leg.stops[1], minutes: 4 }), `alight ${a}→${b}`)
+    ok(S.alight({ now: T, stopsLeft: 2, dest: legDest, next: leg.stops[1], arriveAt: T + 240_000, refresh: R }), `alight ${a}→${b}`)
     ok(S.arrived(T, p.to), `arrived ${a}→${b}`)
   }
 })
@@ -238,8 +243,8 @@ test('기다리는 화면의 스피너는 매초 다른 모양이고 안경 폰�
   assert.equal(S.spin(T + 6000), frames[0])
   for (const f of frames) assert.match(f, /^[▁▃▅▇]{4}$/)
   const a = S.loading(T, '노원', '7호선 열차 확인 중'), b = S.loading(T + 1000, '노원', '7호선 열차 확인 중')
-  assert.ok(a.split('\n')[0].includes(frames[0]) && b.split('\n')[0].includes(frames[1]), a + '\n' + b)
-  const noFix = S.waiting({ now: T, line: '7호선', toward: '장암', at: '', from: '노원', etaSec: 180, refresh: R })
+  assert.ok(a.split('\n')[2].includes(frames[0]) && b.split('\n')[2].includes(frames[1]), a + '\n' + b)
+  const noFix = S.waiting({ now: T, line: '7호선', toward: '장암', at: '', from: '노원', arriveAt: T + 180_000, refresh: R })
   assert.ok(noFix.includes(S.spin(T)) && transfer().includes(S.spin(T)), '기다리는 화면에 스피너가 없습니다')
 })
 
@@ -249,16 +254,16 @@ test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', asyn
   const line = [...new Set(NAMES.flatMap(n => transferLines(n)))].sort((a, b) => S.cols(b) - S.cols(a))[0]
   for (const n of NAMES) {
     for (const note of [undefined, '경로 변경', '반대 방향', '지선 이탈', '경로 그대로']) {
-      const base = { now: T, line, note, refresh: R, next: n, legDest: n, stopsLeft: 12, paceMs: 120000, pathLen: 13, index: 0 }
-      ok(S.riding({ ...base, at: { station: n, label: '부근 (추정)' }, estimated: 1, transfer: { line, finalDest: n, finalMinutes: 55 } }), `riding 환승 ${n} ${note}`)
+      const base = { now: T, line, note, refresh: R, next: n, legDest: n, stopsLeft: 12, paceMs: 120000, pathLen: 13, index: 0, legAt: T + 1_440_000 }
+      ok(S.riding({ ...base, at: { station: n, label: '부근 (추정)' }, estimated: 1, transfer: { line, finalDest: n, finalAt: T + 3_300_000 } }), `riding 환승 ${n} ${note}`)
       ok(S.riding({ ...base, at: { station: n, label: '출발' }, estimated: 0 }), `riding ${n} ${note}`)
     }
-    ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, minutes: 4, note: '지선 이탈' }), `alight2 ${n}`)
-    ok(S.alight({ now: T, stopsLeft: 1, dest: n, next: n, minutes: 2 }), `alight1 ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, note: '지선 이탈', refresh: R, estimated: true }), `alight2 ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 1, dest: n, next: n, arriveAt: T + 120_000, refresh: R }), `alight1 ${n}`)
     ok(S.arrived(T, n), `arrived ${n}`)
     ok(S.transfer({ now: T, station: n, from: line, to: '9호선', toward: n, rest: 23, minutes: 50, finalDest: n, note: '반대 방향' }), `transfer ${n}`)
-    ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, minutes: 4, then: line }), `alight 환승 ${n}`)
-    ok(S.waiting({ now: T, line, toward: n, at: `${n} 출발`, from: n, etaSec: 300, refresh: R }), `waiting ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R }), `alight 환승 ${n}`)
+    ok(S.waiting({ now: T, line, toward: n, at: `${n} 출발 · 12정거장 전`, from: n, arriveAt: T + 300_000, refresh: R }), `waiting ${n}`)
     ok(S.lost({ now: T, last: n, agoSec: 200, guess: n, dest: n, stopsLeft: 12, bar: S.track(13, 3, 2), refresh: R }), `lost ${n}`)
     const legs = [{ line, stops: [n, n] }, { line, stops: [n, n] }, { line, stops: [n, n] }]
     ok(S.route({ now: T, from: n, to: n, legs, stops: 30, minutes: 60, quota: '오늘 조회 850/1000' }), `route ${n}`)
@@ -292,9 +297,10 @@ test('조사 으로/로는 받침을 따른다', () => {
 })
 
 test('환승역 하차 안내는 갈아탈 노선을 말한다', () => {
-  const s = S.alight({ now: T, stopsLeft: 2, dest: '노원', next: '중계', minutes: 4, then: '4호선' })
+  const s = S.alight({ now: T, stopsLeft: 2, dest: '노원', next: '중계', arriveAt: T + 240_000, then: '4호선', refresh: R })
   assert.ok(s.includes('4호선으로 환승') && s.split('\n')[0].includes('환승'), s)
-  assert.ok(!S.alight({ now: T, stopsLeft: 2, dest: '노원', next: '중계', minutes: 4 }).includes('환승'))
+  assert.ok(!S.alight({ now: T, stopsLeft: 2, dest: '노원', next: '중계', arriveAt: T + 240_000, refresh: R }).includes('환승'))
+  assert.ok(s.includes('두 정거장 뒤 갈아타세요'), s)
 })
 
 test('상태 코드 3(전역출발)은 접근이다', () => {

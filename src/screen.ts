@@ -68,6 +68,8 @@ export function refreshLine(r: Refresh): string {
   const filled = Math.min(BAR_CELLS, Math.round(((total - sec) / total) * BAR_CELLS))
   const bar = '━'.repeat(filled) + '─'.repeat(BAR_CELLS - filled)
   const n = String(sec).padStart(2, ' ')
+  // 분 단위 시계에서는 초읽기 숫자도 뺀다. 매초 바뀌는 글자가 없어야 화면을 덜 쓴다. 막대만 차오른다.
+  if (!clock.seconds) return r.failed ? `${bar} 재시도 대기` : `${bar} 갱신 대기`
   if (r.failed) return `${bar} ${n}초 뒤 재시도`
   return sec === 0 ? `${bar} 갱신 중` : `${bar} ${n}초 뒤 갱신`
 }
@@ -96,26 +98,27 @@ export const ro = (w: string): string => {
   const c = w.charCodeAt(w.length - 1) - 0xac00
   return c >= 0 && c < 11172 && c % 28 !== 0 && c % 28 !== 8 ? `${w}으로` : `${w}로`
 }
-const mins = (ms: number, stops: number) => Math.max(1, Math.round((ms * stops) / 60_000))
 
-// 진행 띠. ● 지나옴, ◌ 추정, ○ 남음, ◎ 하차역.
-// 구분자를 넣지 않는다. '━'는 전각이라 12개를 이으면 46칸이 되어 줄이 접힌다.
+// 진행 띠. ● 지나옴, ▶ 지금(관측), ▷ 지금(추정), ◌ 추정으로 지나옴, ○ 남음, ◎ 하차역.
+// 지금 위치에 다른 글리프를 쓴다. 전부 ●이면 '●●'에서 어디가 지금인지 가를 수 없었다(리뷰 1라운드).
+// 구분자를 넣지 않는다. 모두 확인된 전각 글리프라 한 칸이 2칸이다.
 export function track(len: number, index: number, estimated: number, cells = 10): string {
   const marks: string[] = []
   for (let i = 0; i < len; i++) {
     if (i === len - 1) marks.push('◎')
+    else if (i === index) marks.push(estimated > 0 ? '▷' : '▶')
     else if (i > index) marks.push('○')
     else if (i > index - estimated) marks.push('◌')
     else marks.push('●')
   }
   if (marks.length <= cells) return marks.join('')
-  // 길면 줄이되 지금 위치와 하차역은 반드시 남긴다. 앞만 자르던 때는 12정거장 구간 초반에
-  // 지금 위치가 잘려 '─○○○○○○○○◎'만 보였다(2026-09-26 시뮬레이터). 줄인 자리는 ─로 보인다.
-  // ⋯는 안경 폰트에서 확인되지 않았다. 확인된 ─를 쓴다.
+  // 길면 줄이되 지금 위치와 하차역은 반드시 남긴다. 줄인 자리는 '··'(2칸)로 보인다.
+  // ─는 갱신 막대와 같은 글리프라 뜻이 겹쳤다(리뷰 1라운드). ⋯는 안경 폰트에서 확인되지 않았다.
+  const GAP = '··'
   const from = Math.max(0, index - 1)
-  if (from + cells >= marks.length) return '─' + marks.slice(marks.length - (cells - 1)).join('')
-  const head = from > 0 ? '─' : ''
-  return head + marks.slice(from, from + cells - 2 - head.length).join('') + '─◎'
+  if (from + cells >= marks.length) return GAP + marks.slice(marks.length - (cells - 1)).join('')
+  const head = from > 0 ? GAP : ''
+  return head + marks.slice(from, from + cells - 2 - (from > 0 ? 1 : 0)).join('') + GAP + '◎'
 }
 
 // 한 줄이 넘치면 띄어쓰기에서 접는다. 기기가 제멋대로 접으면 들여쓰기가 깨지고 아래가 밀린다.
@@ -150,7 +153,9 @@ const screen = (...lines: (string | null)[]) => {
 
 // 모든 화면의 첫 줄. 화면에는 도착 예정 시각도 나오므로 현재 시각임을 '지금'으로 밝힌다.
 // 오른쪽 정렬은 폭을 알아야 하므로 쓰지 않는다.
-const head = (now: number, context = '') => `${PAD}현재시각 ${hhmmss(now)}${context ? `  ${context}` : ''}`
+// 초 단위 시계를 끄면(폰 설정) 분 단위다. 안경 화면을 덜 자주 써서 배터리를 아낀다.
+export const clock = { seconds: true }
+const head = (now: number, context = '') => `${PAD}현재시각 ${clock.seconds ? hhmmss(now) : hhmm(now)}${context ? `  ${context}` : ''}`
 // 머리줄 문맥 후보 가운데 한 줄에 들어가는 첫 것을 쓴다. 하나도 안 들어가면 시계만 둔다.
 const fitHead = (now: number, ...contexts: string[]) =>
   head(now, contexts.find(c => cols(head(now, c)) <= MAX_COLS) ?? '')
@@ -168,13 +173,16 @@ export const spin = (now: number): string => {
   return WAVE.map((_, j) => WAVE[(t + j) % WAVE.length]).slice(0, 4).join('')
 }
 
-// 무언가를 기다리는 화면. 머리줄 오른쪽에서 스피너가 돈다.
-// 제목과 본문은 [앞, 뒤] 쌍으로 주면 넘칠 때 두 줄로 나뉜다. '공릉(서울산업대입구)에 오는 열차가…'는 한 줄에 안 들어간다.
+// 무언가를 기다리는 화면. 스피너는 '하는 일' 문구(제목) 끝에 붙는다. 모든 대기 화면이 같은 자리다(리뷰 1라운드).
+// 제목과 본문은 [앞, 뒤] 쌍으로 주면 넘칠 때 두 줄로 나뉜다.
+// ctx는 머리줄 문맥이다(예: '하계 7호선'). 역 이름을 제목에서 빼 한 단어짜리 줄이 생기지 않게 한다.
 type Text = string | [string, string]
 const lines = (t: Text): string[] => typeof t === 'string' ? [`${PAD}${t}`] : pair(t[0], t[1])
-export function loading(now: number, title: Text, body: Text, hint = ''): string {
-  return screen(head(now, spin(now)), '', ...lines(title), '', ...(body ? lines(body) : []), '',
-    ...hint.split('\n').filter(Boolean).map(h => `${PAD}${h}`))
+const hints = (hint: string) => hint.split('\n').map(h => h.trim()).filter(Boolean).map(h => `${PAD}${h}`)
+export function loading(now: number, title: Text, body: Text, hint = '', ctx = ''): string {
+  const t = lines(title)
+  t[t.length - 1] += `  ${spin(now)}`
+  return screen(fitHead(now, ctx), '', ...t, '', ...(body ? lines(body) : []), '', ...hints(hint))
 }
 
 // 머리줄이 넘치면 행선지를 버리고 노선만 남긴다.
@@ -206,90 +214,107 @@ export function riding(a: {
   refresh: Refresh
   next: string; legDest: string; stopsLeft: number; paceMs: number
   pathLen: number; index: number; estimated: number
-  transfer?: { line: string; finalDest: string; finalMinutes: number }
-  foot?: string
+  transfer?: { line: string; finalDest: string; finalAt: number }
+  legAt: number          // 이번 구간 끝(하차·환승) 예정 시각. 마지막 관측에 고정한다(현재시각으로 세면 톱니처럼 흔들렸다)
+  hint?: string          // 맨 아래 조작 안내. 기본 '탭: 메뉴'
 }): string {
-  const left = mins(a.paceMs, a.stopsLeft)
+  const left = Math.max(1, Math.round((a.legAt - a.now) / 60_000))
   return screen(
-    // 경로를 바꿨거나 내려야 하면 머리줄에 짧게 밝힌다. 줄을 더 쓰지 않는다(10줄 한도).
+    // 경로를 바꿨거나 내려야 하면 머리줄에 짧게 밝힌다.
     a.note ? fitHead(a.now, `${a.line} · ${a.note}`, a.note) : head(a.now, a.line),
     '',
     `${PAD}${a.at.station} ${a.at.label}`,
-    `${PAD}${refreshLine(a.refresh)}`,
     '',
     `${PAD}다음   ${hero(a.next, 9)}`,
     `${PAD}${track(a.pathLen, a.index, a.estimated)}`,
     ...(a.transfer
       ? [
-          ...pair(a.legDest, `${hhmm(a.now + left * 60_000)} 환승`),
+          ...pair(a.legDest, `${when(a.now, a.legAt)} 환승`),
           `${PAD}${a.stopsLeft}정거장 · ${ro(a.transfer.line)}`,
-          ...pair(a.transfer.finalDest, `${hhmm(a.now + a.transfer.finalMinutes * 60_000)} 도착`),
+          ...pair(a.transfer.finalDest, `${hhmm(a.transfer.finalAt)} 도착`),
         ]
       : [
-          ...pair(a.legDest, `${hhmm(a.now + left * 60_000)} 도착`),
+          ...pair(a.legDest, `${when(a.now, a.legAt)} 도착`),
           `${PAD}${a.stopsLeft}정거장 · 약 ${left}분`,
         ]),
-    a.foot ? `${PAD}${a.foot}` : null,
+    '',
+    `${PAD}${refreshLine(a.refresh)}`,
+    `${PAD}${a.hint ?? '탭: 메뉴'}`,
   )
 }
 
+// 예정 시각. 이미 지났으면 지난 시각 대신 '곧'이라고 한다. 지난 시각을 보이면 앱이 멈춘 것처럼 읽힌다.
+const when = (now: number, at: number) => (at - now < 30_000 ? '곧' : hhmm(at))
+
 // 하차 임박. 화면 전체를 이 한 가지에 내준다.
+// 조판 규칙(강조 화면 공통): 제목과 설명은 PAD, 강조 역 이름은 IN. 이어지는 화면에서 왼쪽 끝이 흔들리지 않는다.
+// 자간은 역 이름에만 벌린다. 문장을 벌리면 음절 나열로 읽혔다(리뷰 1라운드).
 // then: 여기서 갈아탈 노선. 환승역인데 최종 하차와 똑같이 보이면 어디로 갈아타는지 모른다.
-export function alight(a: { now: number; stopsLeft: number; dest: string; next: string; minutes: number; note?: string; then?: string; foot?: string }): string {
-  const title = a.stopsLeft <= 1 ? '다 음 역 에 서  내 립 니 다' : '두  정 거 장  뒤'
-  const foot = a.stopsLeft <= 1 ? `${hhmm(a.now + a.minutes * 60_000)} 도착` : `${a.next} 다음 · 약 ${a.minutes}분`
-  const indent = a.stopsLeft <= 1 ? PAD + PAD : IN
-  return screen(head(a.now, a.note ?? (a.then ? '환승' : '')), '', `${indent}${title}`, '',
-    `${IN}${PAD}${hero(a.dest, 8)}`, a.then ? `${IN}${PAD}${ro(a.then)} 환승` : null, '', `${indent}${foot}`,
-    a.foot ? '' : null, a.foot ? `${PAD}${a.foot}` : null)
+// arriveAt: 하차역 도착 예정. 이미 지났으면 '곧 도착'. 이때가 내릴 준비를 할 때다(도착 관측은 피드 지연으로 늦다).
+export function alight(a: {
+  now: number; stopsLeft: number; dest: string; next: string; arriveAt: number
+  note?: string; then?: string; estimated?: boolean; refresh: Refresh; hint?: string
+}): string {
+  const verb = a.then ? '갈아타세요' : '내리세요'
+  const title = a.stopsLeft <= 1 ? `다음 역에서 ${verb}` : `두 정거장 뒤 ${verb}`
+  const soon = a.arriveAt - a.now < 30_000
+  // 넘치면 뜻 단위로 두 줄로 나눈다. 띄어쓰기에서 아무 데나 접으면 '약 / 1분'처럼 갈라졌다.
+  const detail = a.stopsLeft <= 1
+    ? [`${PAD}${soon ? '곧 도착 · 문 쪽으로 이동하세요' : `${hhmm(a.arriveAt)} 도착 예정`}`]
+    : pair(`다음 ${a.next}${a.estimated ? '(추정)' : ''} ·`, `${a.dest}까지 약 ${Math.max(1, Math.round((a.arriveAt - a.now) / 60_000))}분`)
+  return screen(head(a.now, a.note ?? (a.then ? '환승' : '')), '', `${PAD}${title}`, '',
+    `${IN}${hero(a.dest, 6)}`, a.then ? `${IN}${ro(a.then)} 환승` : null, '',
+    ...detail, `${PAD}${refreshLine(a.refresh)}`, `${PAD}${a.hint ?? '탭: 메뉴'}`)
 }
 
 export function arrived(now: number, dest: string): string {
-  return screen(head(now), '', `${IN}${PAD}${hero(dest, 8)}`, '', `${IN}${wide('내리세요')}`, '',
+  return screen(head(now, '도착'), '', `${PAD}도착했습니다. 내리세요`, '', `${IN}${hero(dest, 6)}`, '',
     `${PAD}탭: 처음으로`, `${PAD}더블탭: 종료`)
 }
 
 export function transfer(a: { now: number; station: string; from: string; to: string; toward: string; rest: number; minutes: number; finalDest: string; note?: string }): string {
   return screen(
-    head(a.now, a.note ?? '환승'), '', `${IN}${hero(a.station, 6)}`, '',
+    head(a.now, a.note ?? '환승'), '', `${PAD}여기서 갈아타세요`, '', `${IN}${hero(a.station, 6)}`, '',
     // 같은 노선으로 되돌아가는 경우 '7호선 → 7호선'은 뜻이 없다. 반대 방향임을 말한다.
     a.from === a.to ? `${PAD}${a.from} 반대 방향 열차로` : `${PAD}${a.from} → ${a.to}`,
     `${PAD}${a.toward} 방면 승강장으로`,
-    // 최종 목적지 이름이 있어야 이 환승이 어디로 가는 길인지 안다. '남은 17정거장 ·'만 있었다.
+    // 최종 목적지 이름이 있어야 이 환승이 어디로 가는 길인지 안다.
     ...pair(`${a.finalDest} ${hhmm(a.now + a.minutes * 60_000)} 도착`, `· ${a.rest}정거장`),
     // 사용자에게 시키지 않는다. 타던 열차가 떠나면 앱이 다음 열차를 찾는다. 탭은 지름길일 뿐이다.
     `${PAD}다음 열차를 찾는 중  ${spin(a.now)}`,
-    `${PAD}탭: 지금 바로`,
+    `${PAD}탭: 지금 다음 열차 찾기`,
   )
 }
 
 // 고른 열차가 아직 승강장에 오지 않았다. 기다리는 동안 실제 위치를 보여준다.
-export function waiting(a: { now: number; line: string; toward: string; at: string; from: string; etaSec: number; refresh: Refresh }): string {
-  const eta = a.etaSec > 0
-    ? `${hhmm(a.now + a.etaSec * 1000)} 도착 · 약 ${Math.max(1, Math.round(a.etaSec / 60))}분`
-    : `${a.from} 도착을 기다립니다`
+// arriveAt: 조회 시각 기준 도착 예정(탭한 시각 기준이면 목록을 오래 볼수록 늦게 나왔다).
+// at: 열차가 지금 있는 곳('중계 출발 · 1정거장 전'). 주행 화면과 같은 표기다('현재'를 붙이지 않는다).
+export function waiting(a: { now: number; line: string; toward: string; at: string; from: string; arriveAt: number; refresh: Refresh; hint?: string }): string {
+  const eta = a.arriveAt - a.now >= 30_000
+    ? `${hhmm(a.arriveAt)} 도착 · 약 ${Math.max(1, Math.round((a.arriveAt - a.now) / 60_000))}분`
+    : `곧 도착`
   return screen(
     head(a.now, context(a.now, a.line, a.toward)), '',
     `${PAD}${comingTitle(a.toward)}`, '',
-    // 아직 위치를 못 받았으면 '현재 확인 중'이 아니라 '위치 확인 중'이라고 쓴다.
-    `${PAD}${a.at ? `현재 ${a.at}` : `위치 확인 중  ${spin(a.now)}`}`,
-    `${PAD}${refreshLine(a.refresh)}`,
+    // 아직 위치를 못 받았으면 '위치 확인 중'이라고 쓰고 스피너를 붙인다.
+    `${PAD}${a.at || `위치 확인 중  ${spin(a.now)}`}`,
     `${PAD}${eta}`, '',
-    `${PAD}탭: 메뉴`,
-    `${PAD}더블탭: 처음으로`,
+    `${PAD}${refreshLine(a.refresh)}`,
+    `${PAD}${a.hint ?? '탭: 메뉴'}`,
   )
 }
 
 // 관측이 끊겼다. 추정임을 화면이 스스로 말한다.
-export function lost(a: { now: number; last: string; agoSec: number; guess: string; dest: string; stopsLeft: number; bar: string; refresh: Refresh; foot?: string }): string {
+// '신호 끊김'은 조회가 실제로 실패하고 있을 때만 쓴다. 조회는 되는데 열차가 서 있으면 주행 화면의 '정차 중'이다.
+export function lost(a: { now: number; last: string; agoSec: number; guess: string; dest: string; stopsLeft: number; bar: string; refresh: Refresh; hint?: string }): string {
   return screen(
-    head(a.now, '신호 끊김'),
-    `${PAD}마지막 관측  ${a.last}  ${ago(a.agoSec)}`,
-    `${PAD}${refreshLine(a.refresh)}`, '',
-    `${PAD}추정   ${hero(a.guess, 14)} 부근`, '',
+    head(a.now, '신호 끊김'), '',
+    `${PAD}${a.guess} 부근 (추정)`,
+    `${PAD}마지막 관측 ${a.last} · ${ago(a.agoSec)}`, '',
     `${PAD}${a.bar}`,
     ...pair(a.dest, `${a.stopsLeft}정거장 남음`), '',
-    `${PAD}${a.foot ?? '탭: 메뉴'}`,
+    `${PAD}${refreshLine(a.refresh)}`,
+    `${PAD}${a.hint ?? '탭: 메뉴'}`,
   )
 }
 
@@ -301,14 +326,16 @@ export function route(a: {
 }): string {
   const page = (body: string[]) => screen(
     head(a.now),
+    '',
     ...pair(`${a.from} →`, a.to),
-    `${PAD}${a.stops}정거장 · ${hhmm(a.now + a.minutes * 60_000)} 도착 예정`, '',
+    `${PAD}${a.stops}정거장 · ${hhmm(a.now + a.minutes * 60_000)} 도착 예정`,
+    body.length ? '' : null,
     ...body, '',
     `${PAD}열차를 확인하는 중  ${spin(a.now)}`,
     a.quota ? `${PAD}${a.quota}` : null,
   )
-  // 구간마다 한 줄. '서울역 환승 · 공항철도 2정거장'은 33칸이라 접혔다. 조사로 줄인다.
-  const full = page(a.legs.map((l, i) => i
+  // 구간마다 한 줄. 직통이면 구간 줄을 뺀다('14정거장'이 두 번 나왔다).
+  const full = page(a.legs.length < 2 ? [`${PAD}${a.legs[0].line} 직통`] : a.legs.map((l, i) => i
     ? `${PAD}${l.stops[0]}에서 ${l.line} ${l.stops.length - 1}정거장`
     : `${PAD}${l.line} ${l.stops.length - 1}정거장`))
   if (full.split('\n').length <= MAX_LINES) return full
@@ -320,7 +347,6 @@ export function route(a: {
 }
 
 // 안내와 오류. 어떤 화면에서든 탭으로 빠져나갈 수 있어야 한다.
-export function notice(now: number, title: string, body: string, hint: string): string {
-  return screen(head(now), '', `${PAD}${title}`, '', body ? `${PAD}${body}` : null, '',
-    ...hint.split('\n').map(h => `${PAD}${h}`))
+export function notice(now: number, title: string, body: string, hint: string, ctx = ''): string {
+  return screen(fitHead(now, ctx), '', `${PAD}${title}`, '', body ? `${PAD}${body}` : null, '', ...hints(hint))
 }

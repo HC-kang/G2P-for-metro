@@ -8,3 +8,9 @@ CREATE TABLE IF NOT EXISTS logs (
   body TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS logs_at ON logs(at);
+
+-- 서울 API를 실제로 부른 횟수(KST 날짜별). 워커가 950건에서 막는다.
+CREATE TABLE IF NOT EXISTS usage (
+  day TEXT PRIMARY KEY,
+  n INTEGER NOT NULL
+);

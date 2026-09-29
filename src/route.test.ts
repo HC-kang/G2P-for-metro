@@ -110,3 +110,33 @@ test('locate는 관측이 없으면 null을 준다', () => {
   assert.equal(locate(S, [], 1000), null)
   assert.equal(locate(S, [{ station: 'Z', at: 0 }], 1000), null)
 })
+
+test('정차 중인 열차를 다시 관측하면 다음 역으로 밀지 않고, 도착 예정은 늦춘다', async () => {
+  const { locate, legEta, FEED_LAG_MS } = await import('./route.ts')
+  // 90초에 B 도착, 그 뒤 3분 동안 계속 B 도착으로 보였다(지연 정차)
+  const f = [{ station: 'A', at: 0, status: 2 }, { station: 'B', at: 90_000, seen: 270_000, status: 1 }]
+  assert.deepEqual(locate(S, f, 280_000), { index: 1, estimated: 0, stale: false }, '방금 다시 봤으니 B다')
+  const etaMoving = legEta(S, [{ station: 'A', at: 0, status: 2 }, { station: 'B', at: 90_000, seen: 90_000, status: 1 }], 100_000)
+  assert.ok(legEta(S, f, 280_000) > etaMoving, '서 있었던 만큼 도착 예정이 늦어진다')
+  assert.equal(legEta(S, f, 280_000), 270_000 - FEED_LAG_MS + 4 * 90_000)
+})
+
+test('도착 예정은 현재시각이 흘러도 흔들리지 않는다', async () => {
+  const { legEta } = await import('./route.ts')
+  const f = [{ station: 'A', at: 0, status: 2 }, { station: 'B', at: 90_000, status: 2 }]
+  assert.equal(legEta(S, f, 100_000), legEta(S, f, 150_000))
+})
+
+test('신호 끊김은 마지막 확인 시각부터 센다', async () => {
+  const { locate, STALE_MS } = await import('./route.ts')
+  const f = [{ station: 'B', at: 0, seen: 500_000, status: 1 }]
+  assert.equal(locate(S, f, 500_000 + STALE_MS - 1)!.stale, false)
+  assert.equal(locate(S, f, 500_000 + STALE_MS + 1)!.stale, true)
+})
+
+test('같은 노선 위 정거장 수를 센다', async () => {
+  const { hops } = await import('./route.ts')
+  assert.equal(hops('7호선', '중계', '하계'), 1)
+  assert.equal(hops('7호선', '하계', '청담'), 14)
+  assert.equal(hops('7호선', '하계', '없는역'), -1)
+})

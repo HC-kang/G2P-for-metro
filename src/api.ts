@@ -17,6 +17,7 @@ export type TrainPos = {
 export type Arrival = {
   trainNo: string; station: string; line: string
   etaSec: number; msg: string; toward: string; dest: string; express: boolean
+  last: boolean   // 막차(lstcarAt=1). 목록에 표시한다
 }
 
 // "광운대행 - 시청방면"           -> "시청"
@@ -100,6 +101,7 @@ export function parseArrivals(body: unknown): Arrival[] {
     toward: liveName(lineName(String(r.subwayId ?? '')), towardOf(String(r.trainLineNm ?? ''))),
     dest: destOf(String(r.trainLineNm ?? '')),
     express: String(r.btrainSttus ?? '').includes('급행'),
+    last: String(r.lstcarAt ?? '') === '1',
   }))
 }
 
@@ -158,7 +160,10 @@ const post = (text: string, kind: 'live' | 'trail', keepalive: boolean): Promise
   }).then(r => r.ok, () => false)
 const logs = REPORTING ? batcher(text => post(text, 'live', true)) : null
 let ended = false
-export const remoteLog = (msg: string): void => { if (!ended) logs?.push(msg) }
+// 폰 설정의 '진단 기록 자동 보고' 스위치. 꺼져 있으면 모으지도 보내지도 않는다.
+let reportOn = true
+export const setReporting = (on: boolean): void => { reportOn = on }
+export const remoteLog = (msg: string): void => { if (!ended && reportOn) logs?.push(msg) }
 // 화면이 꺼지거나 앱이 끝날 때 남은 것을 바로 보낸다.
 export const flushLog = (): void => logs?.flush()
 // 앱이 끝나면 남은 것을 보내고 멈춘다. 종료 뒤에도 WebView가 몇 시간 살아 1분마다 기록을 보냈다(09-28).
@@ -180,16 +185,25 @@ export const setRequestGuard = (fn: (path: string) => void): void => { beforeReq
 const DEV_API = !!import.meta.env?.DEV && typeof location !== 'undefined'
   && new URLSearchParams(location.search).get('api') === 'dev'
 
+// 워커가 서울 API를 실제로 부른 오늘(KST) 횟수. 기기 카운터와 다를 수 있다(캐시, 다른 기기). 큰 쪽을 믿는다.
+let onServerUsed: (n: number) => void = () => {}
+export const setServerUsedListener = (fn: (n: number) => void): void => { onServerUsed = fn }
+
 const get = async (path: string): Promise<unknown> => {
   beforeRequest(path)
   const res = await fetch(`${DEV_API ? '/__api' : BASE}${path}`, { headers: { 'x-metro-token': TOKEN } })
+  const n = Number(res.headers?.get?.('x-metro-used'))
+  if (n > 0) onServerUsed(n)
   if (res.status === 403) throw new Error('앱 설정이 서버와 맞지 않습니다')
+  // 워커가 오늘 한도 가까이 막았다. 토큰이 새도 남이 한도를 다 쓰지 못하게 하는 장치다.
+  if (res.status === 429) throw new ApiError('ERROR-337', CODE_MESSAGE['ERROR-337'] ?? '오늘 조회 한도를 다 썼습니다')
   if (!res.ok) throw new Error(`서버 ${res.status}`)
   return res.json()
 }
 
-export const positions = async (line: string): Promise<TrainPos[]> =>
-  parsePositions(await get(`/position/${encodeURIComponent(line)}`))
+// train을 주면 워커가 그 열차 한 대만 돌려준다. 노선 전체(수십 대)를 받던 것을 줄인다(통신량).
+export const positions = async (line: string, train?: string): Promise<TrainPos[]> =>
+  parsePositions(await get(`/position/${encodeURIComponent(line)}${train ? `?train=${encodeURIComponent(train)}` : ''}`))
 
 // 도착 API는 자기 표기로만 받는다. '공릉'은 데이터 없음, '공릉(서울산업대입구)'는 정상이다.
 // 빌드 때 만든 표에 없으면 예비 이름으로 한 번 더 시도한다.

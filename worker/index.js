@@ -14,6 +14,35 @@ const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'x-metro-token, content-type, x-metro-kind, x-metro-session',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
+  'Access-Control-Expose-Headers': 'x-metro-used',
+}
+
+// 서울 실시간 API는 키 하나에 하루(KST) 1000건이다. 워커가 직접 센다.
+// 기기 카운터만 있으면 토큰이 샜을 때 남이 한도를 다 써도 모른다. 950건에서 막고 남은 50건은 여유로 둔다.
+const DAILY_CAP = 950
+const kstDay = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)
+async function usedToday(env) {
+  if (!env.DB) return 0
+  const row = await env.DB.prepare('SELECT n FROM usage WHERE day = ?').bind(kstDay()).first().catch(() => null)
+  return row?.n ?? 0
+}
+async function countCall(env) {
+  if (!env.DB) return 0
+  const row = await env.DB.prepare('INSERT INTO usage (day, n) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET n = n + 1 RETURNING n')
+    .bind(kstDay()).first().catch(() => null)
+  return row?.n ?? 0
+}
+
+// 앱이 쓰는 필드만 남긴다. 위치 응답은 노선 전체라 크다. train을 주면 그 열차만.
+const POS_FIELDS = ['subwayId', 'statnNm', 'trainNo', 'trainSttus', 'recptnDt', 'directAt', 'statnTnm']
+function slimPositions(body, train) {
+  let j
+  try { j = JSON.parse(body) } catch { return body }
+  const list = j.realtimePositionList
+  if (!Array.isArray(list)) return body
+  const kept = (train ? list.filter(r => r.trainNo === train) : list)
+    .map(r => Object.fromEntries(POS_FIELDS.map(k => [k, r[k]])))
+  return JSON.stringify({ realtimePositionList: kept })
 }
 
 const reply = (body, status, extra = {}) =>
@@ -61,6 +90,12 @@ export default {
     if (request.headers.get('x-metro-token') !== env.METRO_TOKEN) return reply('forbidden', 403)
 
     const upstream = `${BASE}/${env.SEOUL_RT_KEY}/json/${build(arg)}`
+    const before = await usedToday(env)
+    if (before >= DAILY_CAP) {
+      console.log('[quota] cap reached', before)
+      return reply(JSON.stringify({ errorMessage: { code: 'ERROR-337', message: '오늘 조회 한도' } }), 429,
+        { 'Content-Type': 'application/json; charset=utf-8', 'x-metro-used': String(before) })
+    }
     let res
     try {
       // 같은 요청이 몇 초 안에 겹치면 상류를 다시 때리지 않는다(서울 API 하루 1000건).
@@ -69,9 +104,13 @@ export default {
     } catch {
       return reply('upstream unreachable', 502)
     }
-    const body = await res.text()
+    const raw = await res.text()
+    // 캐시에서 나온 응답은 서울 API를 부르지 않았다. 실제로 부른 것만 센다.
+    const hit = res.headers.get('cf-cache-status') === 'HIT'
+    const used = hit ? before : await countCall(env)
     // 한도 소진은 HTTP 200으로 온다. tail에서 바로 보이게 남긴다.
-    if (body.includes('ERROR-337')) console.log('[quota] 일일 1000건 한도 소진')
-    return reply(body, res.status, { 'Content-Type': 'application/json; charset=utf-8' })
+    if (raw.includes('ERROR-337')) console.log('[quota] 일일 1000건 한도 소진')
+    const body = kind === 'position' ? slimPositions(raw, url.searchParams.get('train')) : raw
+    return reply(body, res.status, { 'Content-Type': 'application/json; charset=utf-8', 'x-metro-used': String(used) })
   },
 }
