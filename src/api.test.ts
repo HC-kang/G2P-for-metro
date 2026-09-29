@@ -151,3 +151,11 @@ test('보내지 못한 로그 묶음은 되돌렸다가 다음에 보낸다', as
   assert.ok(!sent.at(-1)!.includes('줄 0'), '오래된 줄부터 버린다')
   assert.ok(sent.at(-1)!.includes('줄 4'), sent.at(-1))
 })
+
+test('위치와 도착 방면의 역 이름을 경로 이름으로 읽는다', async () => {
+  const { parsePositions, parseArrivals } = await import('./api.ts')
+  const p = parsePositions({ realtimePositionList: [{ subwayId: '1007', statnNm: '뚝섬유원지', trainNo: '7121', trainSttus: '1', recptnDt: '2026-09-29 09:18:40' }] })
+  assert.equal(p[0].station, '자양')
+  const a = parseArrivals({ realtimeArrivalList: [{ subwayId: '1007', statnNm: '청담', trainLineNm: '장암행 - 뚝섬유원지방면', btrainNo: '7296', barvlDt: '60' }] })
+  assert.equal(a[0].toward, '자양', '방면이 어긋나면 반대 방향 열차까지 후보에 섞인다')
+})

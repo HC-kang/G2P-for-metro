@@ -1,4 +1,4 @@
-import { lineName, arrivalName, altArrivalNames, hasArrivalName } from './stations.ts'
+import { lineName, liveName, arrivalName, altArrivalNames, hasArrivalName } from './stations.ts'
 
 // 두 API가 같은 역을 다르게 쓴다. 위치는 '군자(능동)', 역 목록은 '군자'다.
 // 비교할 때는 양쪽에서 괄호를 뗀다.
@@ -80,7 +80,8 @@ const rows = (body: unknown, key: string): Record<string, string>[] => {
 export function parsePositions(body: unknown): TrainPos[] {
   return rows(body, 'realtimePositionList').map((r): TrainPos => ({
     trainNo: String(r.trainNo ?? ''),
-    station: bare(String(r.statnNm ?? '')),
+    // 경로 데이터 이름으로 바꾼다. '뚝섬유원지'를 모르는 역으로 읽어 7호선 주행마다 판단 보류가 났다.
+    station: liveName(lineName(String(r.subwayId ?? '')), bare(String(r.statnNm ?? ''))),
     status: Number(r.trainSttus ?? 0),
     express: r.directAt === '1',
     terminal: String(r.statnTnm ?? ''),
@@ -95,7 +96,8 @@ export function parseArrivals(body: unknown): Arrival[] {
     line: lineName(String(r.subwayId ?? '')),
     etaSec: Number(r.barvlDt ?? 0),
     msg: String(r.arvlMsg2 ?? ''),
-    toward: towardOf(String(r.trainLineNm ?? '')),
+    // 방면도 경로 이름으로 바꾼다. 안 바꾸면 '뚝섬유원지방면'이 다음 역 '자양'과 어긋나 방향 거르기가 풀린다.
+    toward: liveName(lineName(String(r.subwayId ?? '')), towardOf(String(r.trainLineNm ?? ''))),
     dest: destOf(String(r.trainLineNm ?? '')),
     express: String(r.btrainSttus ?? '').includes('급행'),
   }))
@@ -155,9 +157,12 @@ const post = (text: string, kind: 'live' | 'trail', keepalive: boolean): Promise
     keepalive,
   }).then(r => r.ok, () => false)
 const logs = REPORTING ? batcher(text => post(text, 'live', true)) : null
-export const remoteLog = (msg: string): void => logs?.push(msg)
+let ended = false
+export const remoteLog = (msg: string): void => { if (!ended) logs?.push(msg) }
 // 화면이 꺼지거나 앱이 끝날 때 남은 것을 바로 보낸다.
 export const flushLog = (): void => logs?.flush()
+// 앱이 끝나면 남은 것을 보내고 멈춘다. 종료 뒤에도 WebView가 몇 시간 살아 1분마다 기록을 보냈다(09-28).
+export const endLog = (): void => { logs?.flush(); ended = true }
 
 // 기록 묶음을 보낸다. 성공 여부를 돌려주므로 화면이 사실대로 말할 수 있다.
 export async function sendTrail(text: string): Promise<boolean> {

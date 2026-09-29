@@ -194,8 +194,9 @@ export const ago = (sec: number): string =>
   sec < 0 ? '' : sec < 60 ? `${sec}초 전` : `${Math.floor(sec / 60)}분 전`
 
 // 열차 상태. realtimePosition의 trainSttus다. 승강장 전광판과 같은 표현이다.
+// 3은 '전역출발'이다. 앞 역을 떠나 이 역으로 오는 중이다(5·6호선이 많이 쓴다, 09-29 실측).
 export const statusWord = (status: number): string =>
-  status === 0 ? '진입' : status === 1 ? '도착' : status === 2 ? '출발' : ''
+  status === 0 ? '진입' : status === 1 ? '도착' : status === 2 ? '출발' : status === 3 ? '접근' : ''
 
 // 주행 중. 지금 어디인지와 다음 역이 함께 보여야 한다.
 // 노선 방면은 머리줄로 물러선다. 이미 탄 뒤에는 어디쯤인지가 더 급하다.

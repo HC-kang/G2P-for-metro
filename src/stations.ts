@@ -106,6 +106,25 @@ export const hasArrivalName = (station: string): boolean => apiNames.has(station
 // 조회가 비었을 때 한 번 더 시도할 이름. 좌표표의 괄호 이름과 문장부호 변형이다.
 // 4·19민주묘지를 도착 API는 4.19민주묘지로 쓴다.
 const altMap = new Map<string, string>(Object.entries((data as { altNames?: Record<string, string> }).altNames ?? {}))
+// 실시간 API(열차 위치의 역, 도착 정보의 '…방면')가 쓰는 이름을 경로 데이터 이름으로 바꾼다.
+// 2026-09-29 전 노선 실측: 개명(뚝섬유원지→자양)과 표기 차이(서울→서울역, 지제→평택지제)가 있다.
+// 노선마다 다를 수 있다. 4호선은 '총신대입구', 7호선은 같은 자리를 '이수'라 부른다.
+// 모르면 그대로 둔다. 그러면 이탈 판정이 '판단 보류'로 처리한다.
+const LIVE_ALIAS: Record<string, string> = {
+  '서울': '서울역', '지제': '평택지제', '뚝섬유원지': '자양', '7호선:총신대입구': '이수', '4.19민주묘지': '4·19민주묘지',
+}
+const plain = (n: string) => n.replace(/\(.*?\)/g, '').trim()
+export function liveName(line: string, name: string): string {
+  const stations = byLine.get(line) ?? []
+  const on = (n: string) => stations.some(s => s.name === n)
+  if (!stations.length || on(name)) return name
+  const alias = LIVE_ALIAS[`${line}:${name}`] ?? LIVE_ALIAS[name]
+  if (alias && on(alias)) return alias
+  // 도착 API 이름표를 거꾸로 본다. '공릉(서울산업대입구)'의 앞부분처럼 괄호를 뗀 이름이 같은 역이다.
+  const hit = stations.find(s => plain(apiNames.get(s.name) ?? '') === name || plain(altMap.get(s.name) ?? '') === name)
+  return hit ? hit.name : name
+}
+
 export function altArrivalNames(station: string): string[] {
   const out: string[] = []
   const alt = altMap.get(station)

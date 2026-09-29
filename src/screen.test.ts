@@ -296,3 +296,8 @@ test('환승역 하차 안내는 갈아탈 노선을 말한다', () => {
   assert.ok(s.includes('4호선으로 환승') && s.split('\n')[0].includes('환승'), s)
   assert.ok(!S.alight({ now: T, stopsLeft: 2, dest: '노원', next: '중계', minutes: 4 }).includes('환승'))
 })
+
+test('상태 코드 3(전역출발)은 접근이다', () => {
+  assert.equal(S.statusWord(3), '접근')
+  assert.equal(S.statusWord(2), '출발')
+})

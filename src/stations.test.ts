@@ -68,3 +68,15 @@ test('좌표가 있고 고립된 역이 없다', () => {
     }
   }
 })
+
+test('실시간 API의 역 이름을 경로 이름으로 바꾼다 (2026-09-29 전 노선 실측)', async () => {
+  const { liveName } = await import('./stations.ts')
+  assert.equal(liveName('7호선', '뚝섬유원지'), '자양')
+  assert.equal(liveName('7호선', '총신대입구'), '이수')
+  assert.equal(liveName('4호선', '총신대입구'), '총신대입구', '4호선은 그 이름 그대로다')
+  assert.equal(liveName('1호선', '서울'), '서울역')
+  assert.equal(liveName('4호선', '서울'), '서울역')
+  assert.equal(liveName('1호선', '지제'), '평택지제')
+  assert.equal(liveName('7호선', '하계'), '하계')
+  assert.equal(liveName('7호선', '없는역'), '없는역', '모르면 그대로 둔다')
+})

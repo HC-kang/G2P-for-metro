@@ -63,10 +63,9 @@ export default {
     const upstream = `${BASE}/${env.SEOUL_RT_KEY}/json/${build(arg)}`
     let res
     try {
-      // 같은 역을 여러 번 열어도 상류를 다시 때리지 않는다. 5초면 10초 polling에 안전하다.
-      // 서울 API는 하루 1000건이 한도다(ERROR-337). 캐시로 상류 호출을 아낀다.
-      // 20초면 열차 위치가 의미 있게 바뀌지 않는다.
-      res = await fetch(upstream, { cf: { cacheTtl: 20, cacheEverything: true } })
+      // 같은 요청이 몇 초 안에 겹치면 상류를 다시 때리지 않는다(서울 API 하루 1000건).
+      // 5초로 둔다. 20초였을 때 15초 폴링의 절반이 최대 20초 묵은 응답을 받았다(2026-09-29).
+      res = await fetch(upstream, { cf: { cacheTtl: 5, cacheEverything: true } })
     } catch {
       return reply('upstream unreachable', 502)
     }

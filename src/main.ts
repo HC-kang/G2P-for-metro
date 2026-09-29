@@ -18,7 +18,7 @@ import {
 import { COORDS, NAMES, transferLines, arrivalName } from './stations.ts'
 import { plan, planHop, departures, locate, paceMs, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
-import { arrivals, positions, remoteLog, flushLog, sendTrail, REPORTING, SESSION, setRequestGuard, ApiError, type Arrival } from './api.ts'
+import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setRequestGuard, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 
@@ -73,7 +73,7 @@ window.addEventListener('shadow-timer:tick', e => {
   shadowTicks += 1
   shadowFired += (e as CustomEvent<{ fired?: number }>).detail?.fired ?? 0
 })
-every(() => {
+const shadowLog = every(() => {
   if (!shadowTicks) return
   log('shadow ticks', shadowTicks, 'fired', shadowFired, 'visible', document.visibilityState)
   shadowTicks = shadowFired = 0
@@ -524,24 +524,19 @@ const restMinutes = (from: number, pace = DEFAULT_PACE_MS) =>
 
 
 const GPS_TIMEOUT_MS = 5000
-// 서울 API는 하루 1000건이 한도다(ERROR-337). 10초 폴링은 시간당 360건이라 두 번 타면 바닥난다.
-// 상황에 따라 주기를 바꾼다. 급한 순간에만 자주 본다.
-//   하차 2정거장 이내  15초  내려야 할 때를 놓치면 안 된다
-//   열차 기다리는 중    20초  도착 예정이 줄어드는 것을 봐야 한다
-//   그 밖의 주행 중     35초  역 사이가 보통 2분이라 충분하다
-// 40분 주행 한 번에 약 80건이다. 하루 왕복이 200건 안쪽이다.
-const POLL_NEAR_MS = 15_000
-const POLL_WAIT_MS = 20_000
-const POLL_FAR_MS = 35_000
+// 서울 API는 하루 1000건이 한도다(ERROR-337).
+// 폴링은 15초 한 가지다. 서울 피드가 약 15초마다 한꺼번에 갱신되고, 새 기록은 이미 10~35초 늦게 나온다(09-29 실측).
+// 그보다 자주 봐도 얻는 것이 없고, 35초로 늦추면 평균 지연이 38초까지 늘었다. 15초면 평균 약 30초다.
+// 주행 1분에 4건이다. 출퇴근 50분씩 두 번이면 하루 약 400건. 많이 탄 날을 위해 사용량에 따라 늦춘다.
+const POLL_MS = 15_000
+const POLL_SLOW_MS = 25_000      // 오늘 700건을 넘으면
+const POLL_SLOWEST_MS = 35_000   // 오늘 850건을 넘으면
 
 // 개발 모드 ?poll=fast 면 5초. 시뮬레이터 시나리오를 몇 분 안에 돌리려고 둔다. 배포본은 타지 않는다.
 const FAST_POLL = !!import.meta.env?.DEV && new URLSearchParams(location.search).get('poll') === 'fast'
 function pollDelay(): number {
   if (FAST_POLL) return 5_000
-  if (!fixes.length) return POLL_WAIT_MS
-  const g = locate(stops, fixes, Date.now())
-  if (!g) return POLL_WAIT_MS
-  return stopsLeft(stops, stops[g.index]) <= 2 ? POLL_NEAR_MS : POLL_FAR_MS
+  return used >= 850 ? POLL_SLOWEST_MS : used >= 700 ? POLL_SLOW_MS : POLL_MS
 }
 const leg = () => trip!.legs[legIndex]
 const toward = () => leg().stops[leg().stops.length - 1]
@@ -999,7 +994,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
   if (!busy) {
     try {
       log('poll', why, 'gen', gen)
-      const me = (await positions(leg().line)).find(t => t.trainNo === train!.trainNo)
+      let me = (await positions(leg().line)).find(t => t.trainNo === train!.trainNo)
       if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
       lastPollFailed = false
       showFails = 0
@@ -1013,7 +1008,15 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
           stopPolling()
           return showPick(true)
         }
+      } else if (me.status === 3 && me.station === stops[0] && !fixes.length) {
+        // 전역출발: 앞 역을 떠나 출발역으로 오는 중이다. 아직 타지 않았다.
+        misses = 0
+        approach = me.station
+        approachStatus = 3
+        log('train approaching', me.station, '접근', 'at', new Date(me.at).toTimeString().slice(0, 8))
       } else if (stops.includes(me.station)) {
+        // 전역출발(3)은 경로상 한 역 앞을 떠난 것이다. 이 역에 닿은 것으로 치면 위치가 한 역 앞서간다.
+        if (me.status === 3 && stops.indexOf(me.station) > 0) me = { ...me, station: stops[stops.indexOf(me.station) - 1], status: 2 }
         misses = 0
         approach = ''
         atStatus = me.status
@@ -1120,10 +1123,11 @@ async function replanHere(): Promise<void> {
 }
 
 // 잠깐만 머리줄에 띄우는 말. 그새 다른 말로 바뀌었으면 건드리지 않는다.
-function flashNote(text: string): void {
+function flashNote(text: string, ms = 6000): void {
   note = text
-  later(() => { if (note === text) { note = ''; void render() } }, 6000)
+  later(() => { if (note === text) { note = ''; void render() } }, ms)
 }
+let lastDouble = 0
 
 async function render(): Promise<void> {
   if (rendering || menuOpen) return
@@ -1327,6 +1331,11 @@ async function handle(type: OsEventTypeList, index: number): Promise<void> {
       if (mode === 'origin' || mode === 'arrived') {
         stopPolling(); stopOriginWatch(); stopTransferWatch()
         await bridge.shutDownPageContainer(1)
+      } else if (mode === 'riding' && fixes.length && Date.now() - lastDouble > 3000) {
+        // 타고 있을 때는 실수 한 번으로 안내를 잃지 않게 한 번 더 묻는다. 3초 안에 또 두 번 탭하면 처음으로.
+        lastDouble = Date.now()
+        flashNote('더블탭 한 번 더: 처음으로', 3000)
+        await render()
       } else await showOrigin()
     } else if (type === OsEventTypeList.CLICK_EVENT) {
       await onTap(index)
@@ -1353,7 +1362,8 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
     // 누가 앱을 끝냈는지 남긴다. 예전에는 기록이 없어 '안내가 꺼졌다'의 원인을 로그로 가를 수 없었다.
     log('exit', type === OsEventTypeList.SYSTEM_EXIT_EVENT ? 'system' : 'abnormal', 'mode', mode)
     void keepTrail()
-    flushLog()
+    clearInterval(shadowLog)
+    endLog()
     stopPolling()
     stopOriginWatch()
     stopTransferWatch()
