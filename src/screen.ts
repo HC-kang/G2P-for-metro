@@ -68,8 +68,9 @@ export function refreshLine(r: Refresh): string {
   const filled = Math.min(BAR_CELLS, Math.round(((total - sec) / total) * BAR_CELLS))
   const bar = '━'.repeat(filled) + '─'.repeat(BAR_CELLS - filled)
   const n = String(sec).padStart(2, ' ')
-  // 분 단위 시계에서는 초읽기 숫자도 뺀다. 매초 바뀌는 글자가 없어야 화면을 덜 쓴다. 막대만 차오른다.
-  if (!clock.seconds) return r.failed ? `${bar} 재시도 대기` : `${bar} 갱신 대기`
+  // 분 단위 시계(절전)에서는 움직이는 막대도 뺀다. 막대가 2초마다 차올라 주행 중 쓰기가 분당 34회였다.
+  // 고정 문구면 쓰기는 조회로 내용이 바뀔 때와 매 분의 시계뿐이다.
+  if (!clock.seconds) return r.failed ? '갱신 실패 · 곧 다시 시도' : `${total}초마다 갱신`
   if (r.failed) return `${bar} ${n}초 뒤 재시도`
   return sec === 0 ? `${bar} 갱신 중` : `${bar} ${n}초 뒤 갱신`
 }

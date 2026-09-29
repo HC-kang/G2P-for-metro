@@ -307,3 +307,13 @@ test('상태 코드 3(전역출발)은 접근이다', () => {
   assert.equal(S.statusWord(3), '접근')
   assert.equal(S.statusWord(2), '출발')
 })
+
+test('분 단위 시계(절전)에서는 갱신 줄이 매초 바뀌지 않는다', () => {
+  S.clock.seconds = false
+  try {
+    const a = S.refreshLine({ inSec: 12, totalSec: 15, failed: false }), b = S.refreshLine({ inSec: 3, totalSec: 15, failed: false })
+    assert.equal(a, b)
+    assert.equal(a, '15초마다 갱신')
+    assert.ok(!S.riding({ now: T, line: '7호선', at: { station: '하계', label: '도착' }, refresh: R, next: '공릉', legDest: '청담', stopsLeft: 14, paceMs: 120000, pathLen: 15, index: 0, estimated: 0, legAt: T + 1_680_000 }).includes(':00:'), '초가 보이면 안 된다')
+  } finally { S.clock.seconds = true }
+})
