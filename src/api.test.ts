@@ -68,7 +68,7 @@ test('서울 API 오류를 삼키지 않는다', () => {
   const quota = { status: 500, code: 'ERROR-337', message: '데이터요청은 일일 호출건수 최대 1000건을 넘을 수 없습니다. ', total: 0 }
   assert.throws(() => parsePositions(quota), (e: Error) => {
     assert.ok(e instanceof ApiError && e.code === 'ERROR-337')
-    assert.ok(e.message.includes('1000건'), e.message)
+    assert.ok(e.message.includes('서울 API 하루 한도'), e.message)   // 워커 한도(950)와 헷갈리지 않게 건수를 빼고 출처를 밝힌다
     return true
   })
   assert.throws(() => parseArrivals(quota), ApiError)

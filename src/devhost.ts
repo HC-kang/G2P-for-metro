@@ -3,7 +3,7 @@
 //
 //  1. 뒤에 있는 동안 WebView의 진짜 타이머는 멈춘다. 그 사이에 만기된 콜백은 붙잡아 두었다가
 //     앞으로 돌아오는 순간 한꺼번에 부른다(iOS가 멈춘 타이머를 재개할 때와 같다).
-//  2. 그동안 호스트는 1초마다 SDK의 window.__tickShadowTimers(경과ms)를 부른다. SDK의 실제 그림자 타이머 코드가 돈다.
+//  2. 그동안 호스트는 0.5초마다(실기기와 같은 분당 약 120번) SDK의 window.__tickShadowTimers(경과ms)를 부른다. SDK의 실제 그림자 타이머 코드가 돈다.
 //     "ticks": true면 앞에 있을 때도 틱을 보낸다. 실기기 로그(두 번째 폴링이 1초 안에 따라옴)는 이쪽과 맞는다.
 //  3. document.visibilityState가 'hidden'이 되고 visibilitychange가 난다.
 //
@@ -67,5 +67,5 @@ if (import.meta.env?.DEV && new URLSearchParams(location.search).get('host') ===
     const now = Date.now(), elapsed = now - lastTick
     lastTick = now
     if (bg || always) { ticks++; (window as unknown as { __tickShadowTimers?: (ms: number) => void }).__tickShadowTimers?.(elapsed) }
-  }, 1000)
+  }, 500)   // 실기기 호스트는 분당 약 120번 틱을 보낸다(constraints.md 09-29)
 }

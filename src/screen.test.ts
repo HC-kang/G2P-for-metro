@@ -13,6 +13,10 @@ const ok = (s: string, what: string) => {
   // 줄 머리나 끝에 구분점이 떨어지면 안 된다(리뷰 2라운드)
   // 진행 띠의 생략 표시 '··'는 글리프라 뺀다
   for (const l of s.split('\n')) assert.ok(!/^\s*·(?!·)|(?<!·)·\s*$/.test(l), `${what}: 줄 머리·끝에 '·'\n${s}`)
+  // 줄바꿈이 옮길 수 없는 한 어절 줄을 만들면 안 된다(리뷰 3라운드)
+  const widows = S.layStats.widows
+  S.layStats.widows = 0
+  assert.equal(widows, 0, `${what}: 한 어절만 남은 줄\n${s}`)
 }
 // 조작 안내가 있는 화면은 늘 마지막 줄이 조작 안내다(9·10줄 고정)
 const tailPinned = (s: string, what: string) => {
@@ -144,7 +148,10 @@ test('alight는 남은 정거장에 따라 말을 바꾸고, 문장에는 자간
   assert.ok(two.includes('두 정거장 뒤 내리세요'), two)
   assert.ok(one.includes('다음 역에서 내리세요'), one)
   assert.ok(one.includes('18:44 도착 예정'), one)
-  assert.ok(two.includes('다음 중계 · 약 4분'), two)
+  assert.ok(two.includes('18:46 도착 · 다음 중계'), two)   // 시각은 하차역(하계) 도착, 다음 역은 뒤에
+  // 신호가 끊기면 추정과 끊김을 한 줄로 합친다. 역 이름 묶음 아래 빈 줄이 남는다
+  const lost = S.alight({ now: T, stopsLeft: 2, dest: '태릉입구', next: '석계', arriveAt: T + 240_000, then: '7호선', refresh: R, estimated: true, seenMin: 4 })
+  assert.ok(lost.includes('18:46 도착 · 신호 끊김 4분') && lost.includes('환승\n\n'), lost)
   // 도착 예정이 지났으면 지난 시각 대신 행동을 말한다
   assert.ok(S.alight({ now: T, stopsLeft: 1, dest: '하계', next: '중계', arriveAt: T - 5000, refresh: R }).includes('곧 도착'))
   assert.ok(!two.replace(/ /g, '').includes('다음다음'), '어색한 말이 남아 있습니다')
@@ -281,7 +288,9 @@ test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', asyn
     const legs = [{ line, stops: [n, n] }, { line, stops: [n, n] }, { line, stops: [n, n] }]
     ok(S.route({ now: T, from: n, to: n, legs, stops: 30, minutes: 60, quota: '오늘 조회 850/1000' }), `route ${n}`)
     ok(S.loading(T, [`${n}에`, '오는 열차가 아직 없습니다'], [`${n} 방면`, '30초 뒤 다시 확인'], '탭: 지금 확인\n  더블탭: 처음으로'), `loading ${n}`)
-    ok(S.notice(T, `${n}에서 내리세요`, '여기서는 목적지까지 경로를 찾지 못했습니다', '탭: 처음으로\n  더블탭: 종료'), `stranded ${n}`)
+    // main.ts arrive(stranded)와 같은 규칙: 넘치면 '여기서 내리세요'와 역 이름 줄
+    const long = S.cols(`  ${n}에서 내리세요`) > S.MAX_COLS
+    ok(S.notice(T, long ? '여기서 내리세요' : `${n}에서 내리세요`, long ? `${n}\n더 가는 경로가 없습니다` : '더 가는 경로가 없습니다', '탭: 처음으로\n  더블탭: 종료'), `stranded ${n}`)
     ok(S.notice(T, '경로를 찾지 못했습니다', `${n} → ${n}`, '탭: 도착지 다시 고르기'), `noroute ${n}`)
     for (const h of [S.listHead(T, `${n} →`, '목적지'), S.listHead(T, `→ ${n}`, '경로'), S.listHead(T, `${n} ${line}`, line)]) ok(h, `listHead ${n}`)
   }
@@ -346,4 +355,21 @@ test('접힌 문장의 마지막 줄에 한 어절만 남지 않는다', () => {
   assert.ok(t.includes('아직 없습니다') && t.includes('정보에 없습니다'), t)
   const d = S.waiting({ now: Date.UTC(2026, 8, 30, 0, 46, 10), line: '7호선', toward: '석남', at: '', from: '하계', arriveAt: Date.UTC(2026, 8, 30, 0, 47, 50), refresh: { inSec: 5, totalSec: 15, failed: false } })
   assert.ok(d.includes('도착 · 약 1분'), d)   // 보이는 시각 차(09:47−09:46)와 같다
+})
+
+// main.ts의 안내·로딩 문구를 가장 긴 역 이름(동대문역사문화공원)으로 그려 한 어절 줄이 생기지 않는지 본다.
+test('앱의 모든 안내 문구가 긴 역 이름에서도 한 어절 줄을 만들지 않는다', async () => {
+  const { readFileSync } = await import('node:fs')
+  const src = readFileSync(new URL('./main.ts', import.meta.url), 'utf8')
+  const re = /S\.(notice|loading)\(\s*(?:Date\.now\(\)|now)\s*,\s*('[^']*'|`[^`]*`)\s*,\s*('[^']*'|`[^`]*`)/g
+  const sample = (t: string) => t.slice(1, -1)
+    .replace(/\$\{[^}]*(stops|station|from|toward|dest|origin|here)[^}]*\}/g, '동대문역사문화공원')
+    .replace(/\$\{[^}]*(ln|line)[^}]*\}/g, '수인분당선').replace(/\$\{[^}]*\}/g, '950')
+  let m, n = 0
+  S.layStats.widows = 0
+  while ((m = re.exec(src))) {
+    ok(S.notice(T, sample(m[2]), sample(m[3]), '탭: 처음으로'), `main.ts ${src.slice(0, m.index).split('\n').length}행`)
+    n++
+  }
+  assert.ok(n >= 15, `문구 ${n}개만 찾았다`)
 })

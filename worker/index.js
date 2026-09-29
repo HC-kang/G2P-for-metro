@@ -87,10 +87,7 @@ export default {
         } catch (e) {
           console.log('[log] d1 insert failed', String(e))
         }
-        // 14일 지난 것을 가끔 지운다. 백 번에 한 번이면 충분하다.
-        if (Math.random() < 0.01) {
-          ctx.waitUntil(env.DB.prepare("DELETE FROM logs WHERE at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')").run().catch(() => {}))
-        }
+        // 14일 지난 기록은 Cron(scheduled)이 하루 한 번 지운다. 여기서 확률로 지우던 코드는 저장이 성공하면 돌지 않아 뺐다.
       }
       // 한 줄이 길면 대시보드에서 잘리므로 줄 단위로 나눠 찍는다.
       for (const line of text.split('\n')) if (line.trim()) console.log('[device]', line.slice(0, 600))

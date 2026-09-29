@@ -18,7 +18,13 @@ export default defineConfig({
       })
       // 모사 실시간 API. /__api/position/<노선> → .dev/position.json, /__api/arrival/<역> → .dev/arrival.json
       // 앱은 개발 모드 ?api=dev 일 때만 워커 대신 이것을 읽는다. 열차 이탈처럼 실제로는 못 만드는 상황을 만든다.
+      // 장애 주입: .dev/fault.json {"status": 502} | {"hang": true} | {"drop": true}. 파일이 없으면 정상이다.
       server.middlewares.use('/__api', (req, res) => {
+        let fault: { status?: number; hang?: boolean; drop?: boolean } = {}
+        try { fault = JSON.parse(readFileSync('.dev/fault.json', 'utf8')) } catch { /* 정상 */ }
+        if (fault.drop) return req.socket.destroy()
+        if (fault.hang) return
+        if (fault.status) { res.statusCode = fault.status; return res.end('bad gateway') }
         const kind = (req.url ?? '').split('/')[1]?.split('?')[0] ?? ''
         res.setHeader('Content-Type', 'application/json')
         res.setHeader('Cache-Control', 'no-store')

@@ -48,6 +48,9 @@ const toMs = (s: string): number => {
 // 서울 API는 오류도 HTTP 200에 본문으로 준다. 목록이 없다고 빈 배열로 넘기면
 // "도착 정보가 없습니다"로 둔갑해 원인을 숨긴다. 코드를 읽고 말해 준다.
 // 생성자 파라미터 프로퍼티는 node --test의 타입 제거 모드가 거부한다. 평범한 필드로 둔다.
+// 워커가 토큰을 거부했다(403). 기다려도 낫지 않는다. 재시도하지 말고 원인을 말한다(리뷰 3라운드).
+export class ConfigError extends Error {}
+
 export class ApiError extends Error {
   code: string
   constructor(code: string, message: string) {
@@ -57,7 +60,7 @@ export class ApiError extends Error {
 }
 
 const CODE_MESSAGE: Record<string, string> = {
-  'ERROR-337': '오늘 조회 한도(1000건)를 다 썼습니다',
+  'ERROR-337': '서울 API 하루 한도를 다 썼습니다',
   'ERROR-338': 'API key가 실시간 서비스를 쓸 수 없습니다',
   'ERROR-336': '요청 건수가 한도를 넘었습니다',
   'ERROR-335': '샘플 key로는 5건만 볼 수 있습니다',
@@ -189,18 +192,40 @@ const DEV_API = !!import.meta.env?.DEV && typeof location !== 'undefined'
   && new URLSearchParams(location.search).get('api') === 'dev'
 
 // 워커가 서울 API를 실제로 부른 오늘(KST) 횟수. 기기 카운터와 다를 수 있다(캐시, 다른 기기). 큰 쪽을 믿는다.
+// 응답마다 부른다. 헤더가 없으면 -1('서버 집계 없음'). 한 번도 안 불렸으면 앱은 '확인 전'이라고 쓴다.
 let onServerUsed: (n: number) => void = () => {}
 export const setServerUsedListener = (fn: (n: number) => void): void => { onServerUsed = fn }
+// 요청이 서버에 닿지도 못했다(오프라인). 기기 카운터에서 되돌린다. 긴 장애가 그날 한도를 거짓으로 채웠다(리뷰 3라운드).
+let onUnsent: () => void = () => {}
+export const setUnsentListener = (fn: () => void): void => { onUnsent = fn }
+// 마지막으로 서버가 정상 응답한 시각. 실패가 10분 이어지면 앱이 재시도를 멈춘다(리뷰 3라운드).
+let okAt = Date.now()
+const FETCH_TIMEOUT_MS = 10_000
+export const lastOkAt = (): number => okAt
 
 const get = async (path: string): Promise<unknown> => {
   beforeRequest(path)
-  const res = await fetch(`${DEV_API ? '/__api' : BASE}${path}`, { headers: { 'x-metro-token': TOKEN } })
+  let res: Response
+  // 응답이 끝내 안 오면 폴링이 멈춘 채 남는다. 10초에 끊는다(리뷰 3라운드: fetch에 타임아웃이 없었다).
+  const abort = new AbortController()
+  const timer = setTimeout(() => abort.abort(), FETCH_TIMEOUT_MS)
+  try {
+    res = await fetch(`${DEV_API ? '/__api' : BASE}${path}`, { headers: { 'x-metro-token': TOKEN }, signal: abort.signal })
+  } catch (e) {
+    // 끊겨서 서버에 닿지도 못했다면 기기 카운터에서 되돌린다. 시간 초과는 서버가 부른 뒤일 수 있어 그대로 센다.
+    if ((e as Error)?.name !== 'AbortError') onUnsent()
+    throw e
+  } finally {
+    clearTimeout(timer)
+  }
   const n = Number(res.headers?.get?.('x-metro-used'))
   if (n > 0) onServerUsed(n)
-  if (res.status === 403) throw new Error('앱 설정이 서버와 맞지 않습니다')
+  else if (res.ok) onServerUsed(-1)
+  if (res.status === 403) throw new ConfigError('앱 설정이 서버와 맞지 않습니다')
   // 워커가 오늘 한도 가까이 막았다. 토큰이 새도 남이 한도를 다 쓰지 못하게 하는 장치다.
   if (res.status === 429) throw new ApiError('ERROR-337', '오늘 조회 한도(950건)를 다 썼습니다')
   if (!res.ok) throw new Error(`서버 ${res.status}`)
+  okAt = Date.now()
   return res.json()
 }
 

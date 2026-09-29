@@ -18,7 +18,7 @@ import {
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
 import { plan, planHop, departures, locate, legEta, hops, paceMs, reaches, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
-import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setReporting, setRequestGuard, ApiError, type Arrival } from './api.ts'
+import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, lastOkAt, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 import { closest, doubleTapAction, doubleTapHint, type DoubleTapState } from './controls.ts'
@@ -259,11 +259,16 @@ function guard(path: string): void {
 }
 setRequestGuard(guard)
 // 워커가 센 오늘 사용량이 더 크면 그것을 쓴다(캐시·다른 기기·토큰 유출까지 반영된다).
-let serverUsed = -1   // 워커가 센 오늘 수. 헤더가 안 오면 -1('서버 집계 없음')
+// null이면 아직 응답을 못 받았다('확인 전'). 첫 출근 아침에 '없음'이 거짓 경보가 됐다(리뷰 3라운드).
+let serverUsed: number | null = null   // 워커가 센 오늘 수. 헤더가 안 오면 -1('서버 집계 없음')
 setServerUsedListener(n => {
   serverUsed = n
   if (n > used) { used = n; void bridge.setLocalStorage('quota', `${usedDay}:${used}`) }
 })
+setUnsentListener(() => { used = Math.max(0, used - 1) })
+// 서버가 10분 넘게 정상 응답을 못 주면(오프라인, 워커 5xx) 재시도를 멈춘다. 몇 시간씩 돌지 않는다(리뷰 3라운드).
+const SERVER_DOWN_MS = 10 * 60_000
+const serverDown = () => Date.now() - lastOkAt() > SERVER_DOWN_MS
 
 const saveDests = () => bridge.setLocalStorage('destinations', dests.join('\n'))
 
@@ -485,7 +490,7 @@ if (REPORTING) {
 }
 // 오늘 조회 수는 숨기지 않는다. 한도가 보여야 안심하고 켜 둔다.
 function renderUsage(): void {
-  $('#usage').textContent = `오늘 조회 ${used}/${QUOTA_DAY}건 · 서버 집계 ${serverUsed >= 0 ? `${serverUsed}건` : '없음'} · KST 자정에 초기화 · 700건부터 조회 간격을 늘립니다`
+  $('#usage').textContent = `오늘 조회 ${used}/${QUOTA_DAY}건 · 서버 집계 ${serverUsed === null ? '확인 전' : serverUsed >= 0 ? `${serverUsed}건` : '없음'} · KST 자정에 초기화 · 700건부터 조회 간격을 늘립니다`
 }
 renderUsage()
 every(renderUsage, 15_000)
@@ -850,6 +855,16 @@ function armReturn(snap: Resume, ms: number): void {
     void backToRide('timeout')
   }, ms)
 }
+// 실수 탭 복구 중인데 고를 열차가 없거나 조회가 실패했다. 사용자를 글 화면에 남기지 않는다.
+// 첫 화면이 뜬 순간부터 9초를 세고, 초읽기를 본문에 보인 뒤 원래 추적으로 돌아간다(리뷰 3라운드).
+async function repickFallback(title: string): Promise<void> {
+  log('repick fallback', title)
+  if (repickFrom && !repickUntil) { repickUntil = Date.now() + 9_000; armReturn(repickFrom, 9_000) }
+  return showLive(() => S.notice(Date.now(), title, `${Math.max(0, Math.ceil((repickUntil - Date.now()) / 1000))}초 뒤 계속 안내`, backHint()))
+}
+// 재시도와 실패 화면의 탭. 이번 고르기의 인자를 그대로 쓴다.
+const pickAgain = () => showPick(pickArgs.autoBoard, false, pickArgs.walkSec, pickArgs.prefer)
+
 async function backToRide(why: string): Promise<void> {
   const r = repickFrom
   repickFrom = null
@@ -890,7 +905,7 @@ async function showOrigin(intentional = false): Promise<void> {
     rows = []
     // 위치도, 이력도, 자주 가는 곳도 없다. 이때만 사용자에게 말한다.
     await showLive(() => S.loading(Date.now(), '출발역을 정하는 중', '위치 받는 중',
-      dests.length ? '' : '자주 가는 곳을 넣어두면 위치 없이도 시작합니다'))
+      dests.length ? '' : '폰에 자주 가는 곳을 넣으세요'))
   }
   // 위치가 없거나 묵었으면 새 측위를 계속 받아 고쳐 나간다.
   if (!quick || uncertain(quick)) startOriginWatch(gen, since)
@@ -906,7 +921,7 @@ async function showDest(): Promise<void> {
   const shown = dests.filter(d => d !== origin).sort((a, b) => rank(a) - rank(b))
   if (!shown.length) {
     rows = []
-    return showLive(() => S.notice(Date.now(), '갈 곳이 없습니다', '폰 화면에서 자주 가는 곳을 넣으세요', '탭: 출발역 다시 고르기'))
+    return showLive(() => S.notice(Date.now(), '갈 곳이 없습니다', '자주 가는 곳을 폰에서 넣으세요', '탭: 출발역 다시 고르기'))
   }
   rows = shown
   // 경로가 없는 곳도 숨기지 않는다. 사용자가 일부러 넣은 것이고,
@@ -967,7 +982,7 @@ async function chooseRoute(dest: string): Promise<void> {
     mode = 'line'
     rows = []
     // 실시간 미지원 노선(인천·김포·용인·의정부)의 역은 그래프에 없어서 여기로 온다
-    return showLive(() => S.notice(Date.now(), '경로를 찾지 못했습니다', `${origin} → ${dest}`, '탭: 도착지 다시 고르기'))
+    return showLive(() => S.notice(Date.now(), '경로를 찾지 못했습니다', S.cols(`  ${origin} → ${dest}`) <= S.MAX_COLS ? `${origin} → ${dest}` : `→ ${dest}`, '탭: 도착지 다시 고르기'))
   }
   if (options.length === 1) return startTrip(options[0])
 
@@ -978,7 +993,8 @@ async function chooseRoute(dest: string): Promise<void> {
   const mark = (p: Plan) => (routeKey(p) === liked ? '★ ' : '')
   const head = (p: Plan) => `${mark(p)}${p.legs[0].line} ${p.legs[0].stops[1]} 방면`
   // 어디서 갈아타는지가 선택의 핵심이다. '환승 2'만으로는 두 길을 구별할 수 없었다.
-  const via = (p: Plan) => (p.legs.length > 1 ? `${p.legs.slice(1).map(l => l.stops[0]).join('·')} 환승` : '직통')
+  // 경유역은 쉼표로 잇는다. 붙인 점(·)과 구분점(' · ')이 한 행에 섞이면 어지럽다(리뷰 3라운드).
+  const via = (p: Plan) => (p.legs.length > 1 ? `${p.legs.slice(1).map(l => l.stops[0]).join(', ')} 환승` : '직통')
   // '약'은 붙이지 않는다. 행마다 넘침 여부가 달라 어떤 행엔 붙고 어떤 행엔 빠지는 것이 더 어색했다.
   const items = S.tiers(
     options.map(p => `${head(p)}  ${via(p)} · ${tripMinutes(p)}분`),
@@ -988,7 +1004,7 @@ async function chooseRoute(dest: string): Promise<void> {
   log('options', items.join(' / '))
   if (!(await showList(items, () => S.listHead(Date.now(), `${origin} → ${dest}`, `→ ${dest}`, '경로')))) {
     rows = []
-    await showLive(() => S.notice(Date.now(), '노선 목록을 표시하지 못했습니다', '', '탭: 도착지 다시 고르기'))
+    await showLive(() => S.notice(Date.now(), '경로 목록을 그리지 못했습니다', '', '탭: 도착지 다시 고르기'))
   }
 }
 
@@ -1019,13 +1035,14 @@ let routeShownAt = 0
 
 // ---------- 탈 열차 ----------
 
-let pickWalk = 0          // 지금 구간에서 걸어서 닿는 데 드는 초(환승이면 >0)
+// 이번 열차 고르기의 인자. 재시도와 실패 화면의 탭이 그대로 다시 쓴다. showPick(true)로 부르면 다시 고르기 중에
+// 다음 열차를 자동으로 태워 원래 추적으로 돌아갈 길이 없어졌다(리뷰 3라운드).
+let pickArgs = { autoBoard: true, walkSec: 0, prefer: 0 }
 async function startLeg(i: number, quiet = false, walkSec = 0): Promise<void> {
   stopTransferWatch()
   legIndex = i
   autoRepicks = 0
   emptySince = 0
-  pickWalk = walkSec
   stops = leg().stops
   train = null
   approach = ''
@@ -1040,6 +1057,9 @@ async function startLeg(i: number, quiet = false, walkSec = 0): Promise<void> {
 // walkSec: 환승처럼 걸어가야 하면 그보다 빨리 오는 열차는 자동으로 태우지 않는다(닿을 수 없다, 리뷰 1라운드).
 // prefer: 이 시각(ms)에 가장 가까이 오는 열차를 앱이 태운다(자동 다시 고르기). 목록을 띄워 사용자에게 떠넘기지 않는다.
 async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0): Promise<void> {
+  // 주행 중 다시 고르기는 사용자가 고른다. 앱이 다음 열차를 태우면 원래 추적(repickFrom)이 지워진다.
+  if (repickFrom) { autoBoard = false; prefer = 0 }
+  pickArgs = { autoBoard, walkSec, prefer }
   mode = 'pick'
   pickGen += 1
   const gen = pickGen
@@ -1056,6 +1076,7 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
     await hold()
     log('arrivals failed', e)
     rows = []
+    if (repickFrom && repickAuto) return repickFallback('도착 정보를 받지 못했습니다')
     if (e instanceof BurstError) {
       // 시간이 되면 앱이 알아서 다시 조회한다. 초가 줄어드는 게 보이고, 더블탭으로 언제든 나갈 수 있다.
       const until = Date.now() + e.waitSec * 1000
@@ -1064,8 +1085,13 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
         `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`, backHint(), from))
     }
     // 한도 소진은 기다려도 낫지 않는다. 자정까지는 앱이 할 수 있는 게 없다.
-    if (e instanceof QuotaError) return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · KST 자정에 초기화`, backHint()))
-    if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, 'KST 자정에 초기화됩니다', backHint()))
+    if (e instanceof QuotaError) return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · 자정에 초기화`, backHint()))
+    if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, '자정에 초기화됩니다', backHint()))
+    if (e instanceof ConfigError) return showLive(() => S.notice(Date.now(), e.message, '앱을 다시 설치하세요', backHint()))
+    if (serverDown()) {
+      log('server down, stop retrying')
+      return showLive(() => S.notice(Date.now(), '서버 응답이 없습니다', '10분 넘게 받지 못해 멈췄습니다', `탭: 다시 확인\n${backHint()}`, from))
+    }
     const wait = FAST_POLL ? 5 : 20
     const until = Date.now() + wait * 1000
     retryPick(wait, 'error')
@@ -1080,6 +1106,7 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
 
   if (!candidates.length) {
     rows = []
+    if (repickFrom && repickAuto) return repickFallback('다음 열차가 없습니다')
     // 새벽(01~05시)에 조회가 비었으면 운행이 끝난 것이다. 시각만으로 막으면 1시 넘어 달리는 막차를 막았다(리뷰 2라운드).
     const hour = Number(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul', hour: 'numeric', hour12: false })) % 24
     if (hour >= 1 && hour < 5 && !MOCK_API) {
@@ -1101,7 +1128,9 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
   }
   emptySince = 0
   if (prefer) {
-    return board(closest(candidates, a => picksAt + a.etaSec * 1000, prefer))
+    // 원래 예정과 2분 넘게 어긋나면 그 열차는 다음 열차일 가능성이 크다. 원래 열차를 계속 기다린다(리뷰 3라운드).
+    const c = closest(candidates, a => picksAt + a.etaSec * 1000, prefer)
+    return board(Math.abs(picksAt + c.etaSec * 1000 - prefer) <= 120_000 || !train ? c : train)
   }
   // 환승 뒤 자동 진행: 걸어서 닿을 수 있는 첫 열차를 태운다. 닿을 열차가 없으면 목록을 보인다.
   if (autoBoard && walkSec) {
@@ -1192,11 +1221,13 @@ function retryPick(sec: number, why: string): void {
   const g = pickGen
   pickRetrying = true
   log('pick retry in', sec + 's', why)
-  later(() => { pickRetrying = false; if (g === pickGen && mode === 'pick' && !busy) void showPick(true, false, pickWalk) }, sec * 1000)
+  later(() => { pickRetrying = false; if (g === pickGen && mode === 'pick' && !busy) void pickAgain() }, sec * 1000)
 }
 
 async function board(a: Arrival): Promise<void> {
   train = a
+  // 틱이 다시 그리던 옛 화면(경로 요약 등)을 버린다. 자동 다시 고르기로 조회하는 동안 경로 요약이 되살아났다(리뷰 3라운드).
+  current = null
   // 도착 예정은 도착 정보를 받은 시각부터 센다. 탭한 시각부터 세면 목록을 오래 볼수록 늦게 나왔다.
   boardedAt = picksAt || Date.now()
   departedAt = 0
@@ -1336,6 +1367,13 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         mode = 'arrived'
         rows = []
         return showLive(() => S.notice(Date.now(), e.message, '자정에 초기화됩니다', '탭: 처음으로\n더블탭: 종료'))
+      }
+      if (e instanceof ConfigError || serverDown()) {
+        stopPolling()
+        mode = 'arrived'
+        rows = []
+        return showLive(() => S.notice(Date.now(), e instanceof ConfigError ? e.message : '서버 응답이 없습니다',
+          e instanceof ConfigError ? '앱을 다시 설치하세요' : '10분 넘게 받지 못해 멈췄습니다', '탭: 처음으로\n더블탭: 종료'))
       }
     }
     await render()
@@ -1513,7 +1551,10 @@ async function arrive(): Promise<void> {
   rows = []
   if (stranded) {
     mode = 'arrived'
-    return showLive(() => S.notice(Date.now(), `${stops[stops.length - 1]}에서 내리세요`, '여기서는 도착지까지 경로를 찾지 못했습니다', '탭: 처음으로\n더블탭: 종료'))
+    // 긴 역 이름이면 '동대문역사문화공원에서 / 내리세요'로 한 어절이 남는다. 그때는 '여기서 내리세요'와 역 이름 줄로 나눈다.
+    const here = stops[stops.length - 1]
+    const title = S.cols(`  ${here}에서 내리세요`) <= S.MAX_COLS ? `${here}에서 내리세요` : '여기서 내리세요'
+    return showLive(() => S.notice(Date.now(), title, title === '여기서 내리세요' ? `${here}\n더 가는 경로가 없습니다` : '더 가는 경로가 없습니다', '탭: 처음으로\n더블탭: 종료'))
   }
   const nextLeg = trip!.legs[legIndex + 1]
   if (nextLeg) {
@@ -1610,7 +1651,7 @@ async function onTap(index: number): Promise<void> {
   if (mode === 'pick') {
     if (rows[index] === '__back') return backToRide('tap')
     const a = picks.find(p => p.trainNo === rows[index])
-    return a ? board(a) : showPick()          // 실패 화면에서 탭하면 다시 확인
+    return a ? board(a) : pickAgain()          // 실패 화면에서 탭하면 같은 조건으로 다시 확인
   }
   // 주행 중 탭은 메뉴다. 도착 조회 같은 비용 있는 동작은 메뉴에서 고른 뒤에만 일어난다.
   if (mode === 'riding') {
@@ -1728,6 +1769,10 @@ const idleTimer = every(() => {
   log('idle exit', mode)
   stopPolling(); stopOriginWatch(); stopTransferWatch()
   clearInterval(ticker); clearInterval(idleTimer)   // 종료를 한 번만 요청한다. 호스트가 안 닫아도 매분 되풀이하지 않는다
+  // SYSTEM_EXIT와 같은 정리. 종료 뒤에도 매분 기록(shadow ticks)과 로그 전송이 남았다(리뷰 3라운드, 시험 3).
+  void keepTrail()
+  clearInterval(shadowLog)
+  endLog()
   void bridge.shutDownPageContainer(1)
 }, 30_000)
 

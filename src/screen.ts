@@ -134,6 +134,8 @@ export function track(len: number, index: number, estimated: number, cells = 10)
 
 // 한 줄이 넘치면 띄어쓰기에서 접는다. 기기가 제멋대로 접으면 들여쓰기가 깨지고 아래가 밀린다.
 // 역 이름은 '동대문역사문화공원'처럼 20칸짜리가 있어 문구마다 따로 막을 수 없다. 여기서 한 번에 막는다.
+// 줄바꿈이 만든, 옮길 수 없는 한 어절 줄의 수. 전수 시험이 본다(리뷰 3라운드: 기계가 조판을 정했다).
+export const layStats = { widows: 0 }
 const wrap = (line: string): string[] => {
   if (cols(line) <= MAX_COLS) return [line]
   const indent = /^ */.exec(line)![0]
@@ -157,6 +159,8 @@ const wrap = (line: string): string[] => {
     const cut = prev.lastIndexOf(' ')
     const moved = `${indent}${prev.slice(cut + 1)} ${last.trimStart()}`
     if (cut > indent.length && cols(moved) <= MAX_COLS) return [...out.slice(0, -1), prev.slice(0, cut), moved]
+    // 옮길 수 없는 한 어절 줄이다. 시험이 이 수를 보고 문구를 고치게 한다.
+    if (/[가-힣]/.test(last)) layStats.widows += 1
   }
   return [...out, last]
 }
@@ -296,11 +300,13 @@ export function alight(a: {
   const title = a.stopsLeft <= 1 ? `다음 역에서 ${verb}` : `두 정거장 뒤 ${verb}`
   const soon = a.arriveAt - a.now < 30_000
   const est = a.estimated ? ' (추정)' : ''
-  // 역 이름은 바로 위에 크게 있으니 되풀이하지 않는다('다음 석계 · 약 1분'). 넘치면 구분점 없이 두 줄.
-  const detail = a.stopsLeft <= 1
-    ? [`${PAD}${soon ? '곧 도착 · 문 쪽으로 이동하세요' : `${hhmm(a.arriveAt)} 도착 예정${est}`}`]
-    : joinOrSplit(`다음 ${a.next}${est}`, `약 ${Math.max(1, Math.round((a.arriveAt - a.now) / 60_000))}분`)
-  if (a.seenMin) detail.push(`${PAD}신호 끊김 ${a.seenMin}분째`)
+  // 도착 시각은 바로 위 큰 역 이름(하차역)의 시각이다. '다음 자양 · 약 3분'은 3분이 자양까지로 읽혔다(리뷰 3라운드).
+  // 그래서 시각을 앞에 두고 다음 역을 뒤에 둔다. 넘치면 구분점 없이 두 줄.
+  // 신호가 끊겼으면 '(추정)'과 끊김을 한 줄로 합친다. 두 줄이면 역 이름 묶음 아래 빈 줄이 사라졌다(리뷰 3라운드).
+  const detail = soon && a.stopsLeft <= 1 ? [`${PAD}곧 도착 · 문 쪽으로 이동하세요`]
+    : a.seenMin ? [`${PAD}${when(a.now, a.arriveAt)} 도착 · 신호 끊김 ${a.seenMin}분`]
+    : a.stopsLeft <= 1 ? [`${PAD}${hhmm(a.arriveAt)} 도착 예정${est}`]
+    : joinOrSplit(`${when(a.now, a.arriveAt)} 도착`, `다음 ${a.next}${est}`)
   // 강조 블록: 역 이름과 그에 붙는 한 줄은 IN. 나머지 설명은 PAD. 하차·환승·도착 화면 공통.
   return page([head(a.now, a.note ?? (a.then ? '환승' : '하차')), '', `${PAD}${title}`, '',
     `${IN}${hero(a.dest, 6)}`, a.then ? `${IN}${ro(a.then)} 환승` : null, '', ...detail],
@@ -374,14 +380,19 @@ export function route(a: {
     a.quota ? `${PAD}${a.quota}` : null,
   )
   // 구간마다 한 줄. 직통이면 구간 줄을 뺀다('14정거장'이 두 번 나왔다).
+  const widows = layStats.widows   // 넘쳐서 버리는 첫 시도의 줄바꿈은 세지 않는다
   const full = page(a.legs.length < 2 ? [`${PAD}${a.legs[0].line} 직통`] : a.legs.map((l, i) => i
     ? `${PAD}${l.stops[0]}에서 ${l.line} ${l.stops.length - 1}정거장`
     : `${PAD}${l.line} ${l.stops.length - 1}정거장`))
   if (full.split('\n').length <= MAX_LINES) return full
+  layStats.widows = widows
   // 환승이 많고 역 이름이 길면 넘친다. 노선 순서와 환승역만 남긴다.
+  // 환승역은 한 줄에 들어가면 한 줄, 넘치면 한 역씩 줄을 나눈다(기계가 이름 가운데를 끊지 않게).
+  const via = a.legs.slice(1).map(l => l.stops[0])
+  const one = `${PAD}환승 ${via.join(', ')}`
   return page([
     `${PAD}${a.legs.map(l => l.line).join(' → ')}`,
-    `${PAD}${a.legs.slice(1).map(l => l.stops[0]).join('·')} 환승`,
+    ...(cols(one) <= MAX_COLS ? [one] : via.map((v, i) => `${PAD}${i ? '     ' : '환승 '}${v}`)),
   ])
 }
 
