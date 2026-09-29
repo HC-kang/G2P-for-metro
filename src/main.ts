@@ -1111,7 +1111,7 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
     if (e instanceof ConfigError) return showLive(() => S.notice(Date.now(), e.message, CONFIG_NOTE, backHint()))
     if (serverDown()) {
       log('server down, stop retrying')
-      return showLive(() => S.notice(Date.now(), '서버 응답이 없습니다', '10분 넘게 받지 못해 멈췄습니다', `탭: 다시 확인\n${backHint()}`, from))
+      return showLive(() => S.notice(Date.now(), '실시간 정보를 받지 못합니다', '10분 넘게 실패해 멈췄습니다', `탭: 다시 확인\n${backHint()}`, from))
     }
     const wait = FAST_POLL ? 5 : 20
     const until = Date.now() + wait * 1000
@@ -1384,7 +1384,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
       if (e instanceof QuotaError) return stopRide('quota', e.message, `오늘 ${used}/${QUOTA_DAY} · 자정에 초기화`)
       if (e instanceof ApiError) return stopRide(`api ${e.code}`, e.message, apiErrorNote(e))
       if (e instanceof ConfigError) return stopRide('config', e.message, CONFIG_NOTE)
-      if (serverDown()) return stopRide('server down 10 min', '서버 응답이 없습니다', '10분 넘게 받지 못해 멈췄습니다')
+      if (serverDown()) return stopRide('server down 10 min', '실시간 정보를 받지 못합니다', '10분 넘게 실패해 멈췄습니다')
     }
     await render()
     // 모아 둔 진단 기록을 조회 직후에 보낸다. 통신을 따로 깨우지 않는다(리뷰 1라운드).
