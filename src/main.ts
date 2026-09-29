@@ -1369,6 +1369,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         return showLive(() => S.notice(Date.now(), e.message, '자정에 초기화됩니다', '탭: 처음으로\n더블탭: 종료'))
       }
       if (e instanceof ConfigError || serverDown()) {
+        log('server down, stop polling', e instanceof ConfigError ? 'config' : 'no response 10 min')
         stopPolling()
         mode = 'arrived'
         rows = []
