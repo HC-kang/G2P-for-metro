@@ -21,3 +21,4 @@
 - **화면 한도:** 32칸, 10줄, 페이지 950바이트, 목록 항목 62바이트. `screen()`이 접고 빈 줄을 양보한다. 모든 역 이름 전수 테스트가 지킨다. (constraints.md)
 - **서울 실시간 API는 하루 1000건.** 요청마다 `guard()`가 센다. (constraints.md)
 - **검증은 시뮬레이터에서 내가 한다.** 입력 동작 이름은 `click`/`double_click`/`up`/`down`이다. (patterns.md)
+- 2026-09-30 새벽: 리뷰 페르소나 5명(docs/review.md) 4.5 목표로 3~5라운드 반복. 0.5.1·0.5.2를 Hub에 올림. 50분 시뮬레이터 시험 3회, 장애 주입 시험 6~9(스크래치패드 run*.sh). 병렬 시뮬레이터 요령은 patterns.md, 이번 결함은 mistakes.md, 정한 것은 decisions.md.
