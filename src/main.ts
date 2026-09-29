@@ -1764,8 +1764,9 @@ const idleTimer = every(() => {
   // 주행·환승, 그리고 재조회나 목록 갱신이 도는 열차 고르기만 바쁘다. 나머지는 모두 한가한 화면이다
   // (새벽 안내, 한도 안내, 갱신을 멈춘 목록도 끝없이 쓰던 빈틈을 막는다, 리뷰 2라운드).
   const active = mode === 'riding' || mode === 'transfer' || (mode === 'pick' && (pickRetrying || pickRefreshing))
-  const idle = !active
-  if (!idle || busy || Date.now() - Math.max(lastInputAt, idleSince) < IDLE_EXIT_MS) return
+  // 한가한 시간은 마지막으로 바빴던 때부터 잰다. 모드가 그대로인 채 재시도를 멈추면(서버 응답 없음) 27초 만에 꺼졌다(시험 7).
+  if (active) idleSince = Date.now()
+  if (active || busy || Date.now() - Math.max(lastInputAt, idleSince) < IDLE_EXIT_MS) return
   log('idle exit', mode)
   stopPolling(); stopOriginWatch(); stopTransferWatch()
   clearInterval(ticker); clearInterval(idleTimer)   // 종료를 한 번만 요청한다. 호스트가 안 닫아도 매분 되풀이하지 않는다
