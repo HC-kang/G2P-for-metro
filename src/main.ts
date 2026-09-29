@@ -601,6 +601,8 @@ const POLL_SLOWEST_MS = 35_000   // 오늘 850건을 넘으면
 
 // 개발 모드 ?poll=fast 면 5초. 시뮬레이터 시나리오를 몇 분 안에 돌리려고 둔다. 배포본은 타지 않는다.
 const FAST_POLL = !!import.meta.env?.DEV && new URLSearchParams(location.search).get('poll') === 'fast'
+// 개발 모드 ?api=dev: 모사 데이터로 시험 중이다. 새벽 운행 안내를 건너뛴다(한밤중에도 시나리오를 돌린다). 배포본은 타지 않는다.
+const MOCK_API = !!import.meta.env?.DEV && new URLSearchParams(location.search).get('api') === 'dev'
 function pollDelay(): number {
   if (FAST_POLL) return 5_000
   return used >= 850 ? POLL_SLOWEST_MS : used >= 700 ? POLL_SLOW_MS : POLL_MS
@@ -997,7 +999,7 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0): Promise<v
   const ln = leg().line
   // 새벽에는 열차가 없다. 조회해 봐야 '아직 없음'을 되풀이할 뿐이다.
   const hour = Number(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul', hour: 'numeric', hour12: false })) % 24
-  if (hour >= 1 && hour < 5 && !FAST_POLL) {
+  if (hour >= 1 && hour < 5 && !MOCK_API) {
     rows = []
     return showLive(() => S.notice(Date.now(), '지금은 운행 시간이 아닙니다', '첫차는 5시 30분 무렵입니다', '탭: 다시 확인\n더블탭: 뒤로', `${from} ${ln}`))
   }

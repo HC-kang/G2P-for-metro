@@ -94,6 +94,11 @@ const pair = (a: string, b: string, indent = PAD): string[] => {
   const one = `${indent}${a} ${b}`
   return cols(one) <= MAX_COLS ? [one] : [`${indent}${a}`, `${indent}${b}`]
 }
+// 한 줄에 들어가면 ' · '로 잇고, 넘치면 구분점 없이 두 줄로 나눈다(나눈 줄 끝에 '·'가 남아 어색했다).
+const joinOrSplit = (a: string, b: string): string[] => {
+  const one = `${PAD}${a} · ${b}`
+  return cols(one) <= MAX_COLS ? [one] : [`${PAD}${a}`, `${PAD}${b}`]
+}
 // 조사 '으로/로'. 받침이 없거나 ㄹ 받침이면 '로'다. '공항철도으로'라고 쓰고 있었다.
 export const ro = (w: string): string => {
   const c = w.charCodeAt(w.length - 1) - 0xac00
@@ -263,7 +268,7 @@ export function alight(a: {
   // 넘치면 뜻 단위로 두 줄로 나눈다. 띄어쓰기에서 아무 데나 접으면 '약 / 1분'처럼 갈라졌다.
   const detail = a.stopsLeft <= 1
     ? [`${PAD}${soon ? '곧 도착 · 문 쪽으로 이동하세요' : `${hhmm(a.arriveAt)} 도착 예정`}`]
-    : pair(`다음 ${a.next}${a.estimated ? '(추정)' : ''} ·`, `${a.dest}까지 약 ${Math.max(1, Math.round((a.arriveAt - a.now) / 60_000))}분`)
+    : joinOrSplit(`다음 ${a.next}${a.estimated ? '(추정)' : ''}`, `${a.dest}까지 약 ${Math.max(1, Math.round((a.arriveAt - a.now) / 60_000))}분`)
   return screen(head(a.now, a.note ?? (a.then ? '환승' : '')), '', `${PAD}${title}`, '',
     `${IN}${hero(a.dest, 6)}`, a.then ? `${IN}${ro(a.then)} 환승` : null, '',
     ...detail, `${PAD}${refreshLine(a.refresh)}`, `${PAD}${a.hint ?? '탭: 메뉴'}`)
