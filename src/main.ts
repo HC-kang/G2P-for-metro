@@ -21,6 +21,7 @@ import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setReporting, setRequestGuard, ApiError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
+import { doubleTapAction, doubleTapHint, type DoubleTapState } from './controls.ts'
 
 // 최근 기록을 앱 안에 모아 둔다. wrangler tail은 붙어 있을 때만 받으므로
 // 혼자 탈 때 생긴 일을 놓친다. 폰 화면에서 읽고 보낼 수 있어야 한다.
@@ -209,7 +210,8 @@ const prefs = new Map(((await bridge.getLocalStorage('prefs')) ?? '').split('\n'
 
 // 서울 API 하루 한도. 넘으면 ERROR-337이 오고 아무것도 못 본다.
 // 조용히 넘기지 않으려고 직접 센다. 날짜가 바뀌면 0으로 돌아간다.
-const QUOTA_DAY = 1000
+// 워커가 950건에서 막는다(나머지 50건은 여유). 화면의 분모도 같아야 한다(리뷰 2라운드: 950/1000에서 '다 썼습니다').
+const QUOTA_DAY = 950
 const QUOTA_WARN = 800
 // 서울 API는 KST 자정에 초기화된다. UTC 날짜를 쓰면 오전 9시에 엉뚱하게 초기화된다.
 const today = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)
@@ -256,7 +258,9 @@ function guard(path: string): void {
 }
 setRequestGuard(guard)
 // 워커가 센 오늘 사용량이 더 크면 그것을 쓴다(캐시·다른 기기·토큰 유출까지 반영된다).
+let serverUsed = -1   // 워커가 센 오늘 수. 헤더가 안 오면 -1('서버 집계 없음')
 setServerUsedListener(n => {
+  serverUsed = n
   if (n > used) { used = n; void bridge.setLocalStorage('quota', `${usedDay}:${used}`) }
 })
 
@@ -480,7 +484,7 @@ if (REPORTING) {
 }
 // 오늘 조회 수는 숨기지 않는다. 한도가 보여야 안심하고 켜 둔다.
 function renderUsage(): void {
-  $('#usage').textContent = `오늘 조회 ${used}/${QUOTA_DAY}건 · KST 자정에 초기화 · 700건부터 조회 간격을 늘립니다`
+  $('#usage').textContent = `오늘 조회 ${used}/${QUOTA_DAY}건 · 서버 집계 ${serverUsed >= 0 ? `${serverUsed}건` : '없음'} · KST 자정에 초기화 · 700건부터 조회 간격을 늘립니다`
 }
 renderUsage()
 every(renderUsage, 15_000)
@@ -509,6 +513,7 @@ let boardedAt = 0            // 열차를 고른 시각. 도착 예정 시간을
 let departedAt = 0           // 고른 열차가 출발역을 떠난 시각. 2분 동안 탭 한 번이 '못 탔으면 다음 열차'다
 let approach = ''            // 아직 승강장에 오지 않은 열차의 현재 역
 let approachStatus = -1      // 그 역에서의 상태(진입·도착·출발)
+let approachAt = 0           // 그 상태가 된 시각(피드 recptnDt)
 // '탭: 열차 다시 고르기'가 적힌 화면에서만 탭이 다시 고르기다.
 // 안내 없는 주행 화면에서 탭마다 도착 조회를 하면 답답해서 누를수록 한도가 샌다.
 let lastSeen = ''        // 직전 관측 역(경로 밖 포함). 진행 방향을 잡는 데 쓴다
@@ -540,8 +545,14 @@ let showFails = 0
 // 탭 처리 중(도착 정보를 기다리는 중)에도 시계와 스피너는 돌아야 한다. 예전에는 이때 멈춰서
 // 스피너가 가장 필요한 순간에 정지했다. 이때는 글자만 갈아끼운다. 페이지를 다시 만들면 처리 중인 전환과 부딪힌다.
 // 주행 모드의 current는 탑승 전 화면의 것이라 믿지 않는다. 주행 화면은 render가 그린다.
+// 안경을 벗으면 아무도 안 보는 매초 쓰기를 멈춘다. 조회 결과로 바뀌는 내용은 폴링이 그린다(리뷰 2라운드).
+let wearing = true
+bridge.onDeviceStatusChanged(st => {
+  const w = st?.isWearing !== false
+  if (w !== wearing) { wearing = w; log('wearing', w) }
+})
 const ticker = every(() => {
-  if (rendering || showFails >= SHOW_FAIL_STOP) return
+  if (rendering || showFails >= SHOW_FAIL_STOP || !wearing) return
   if (listHead) void tickHead(listHead())
   else if (busy) { if (pageIsText && current && mode !== 'riding') void tickText(current()) }
   else if (mode === 'riding') void render()
@@ -580,7 +591,7 @@ const TRANSFER_MIN = 4
 // 환승 통로를 걸어 다음 승강장에 닿는 시간. 이보다 빨리 오는 열차는 자동으로 태우지 않는다.
 const TRANSFER_WALK_SEC = 150
 // 환승 화면에서 '지금 다음 열차 찾기'를 누르면 이미 승강장 가까이 왔다고 본다.
-const TRANSFER_TAP_WALK_SEC = 60
+const TRANSFER_TAP_WALK_SEC = 120   // 60초였다. 내리자마자 누르면 닿지 못할 열차를 태웠다(리뷰 2라운드)
 const tripStops = (p: Plan) => p.legs.reduce((n, l) => n + l.stops.length - 1, 0)
 const tripMinutes = (p: Plan, pace = DEFAULT_PACE_MS) =>
   Math.round((tripStops(p) * pace) / 60_000 + (p.legs.length - 1) * TRANSFER_MIN)
@@ -605,6 +616,7 @@ const FAST_POLL = !!import.meta.env?.DEV && new URLSearchParams(location.search)
 const MOCK_API = !!import.meta.env?.DEV && new URLSearchParams(location.search).get('api') === 'dev'
 function pollDelay(): number {
   if (FAST_POLL) return 5_000
+  if (fixes.length && misses >= 4) return POLL_SLOWEST_MS   // 탄 열차가 한동안 안 보인다. 아껴 가며 기다린다
   return used >= 850 ? POLL_SLOWEST_MS : used >= 700 ? POLL_SLOW_MS : POLL_MS
 }
 const leg = () => trip!.legs[legIndex]
@@ -625,8 +637,11 @@ function stopPolling(): void {
 const GPS_FRESH_MS = 30_000
 const RECENT_ARRIVAL_MS = 20 * 60_000
 // '약 0m'는 읽기 어색하다. 가까우면 말로 한다.
+// 묵은 위치에서 '약 879m'는 정밀하지 않은 값을 정밀하게 보이게 한다. 100m 단위로 반올림한다(리뷰 2라운드).
 const dist = (m: number, rough: boolean): string =>
-  m < 100 ? (rough ? '근처' : '바로 앞') : `${rough ? '약 ' : ''}${m < 1000 ? `${m}m` : `${(m / 1000).toFixed(1)}km`}`
+  m < 100 ? (rough ? '근처' : '바로 앞')
+    : rough ? `약 ${m < 1000 ? `${Math.round(m / 100) * 100}m` : `${(m / 1000).toFixed(1)}km`}`
+    : m < 1000 ? `${m}m` : `${(m / 1000).toFixed(1)}km`
 const ORIGIN_WATCH_MS = 180_000
 
 type Loc = { latitude: number; longitude: number; accuracy?: number; timestamp?: number }
@@ -735,10 +750,11 @@ async function renderOrigin(fix: Loc | null): Promise<boolean> {
   rows = cands.map(c => c.name)
   originTop = rows[0]
   const items = S.rows(rows, n => cands.find(c => c.name === n)!.label)
-  // 방금 떠난 여정을 5분 동안 되돌릴 수 있다. 실수 한 번으로 안내를 잃지 않는다.
+  // 방금 떠난 여정을 5분 동안 되돌릴 수 있다. 둘째 줄에 둔다. 첫 줄(가장 가까운 역)을 습관처럼 누르면
+  // 옛 여정이 되살아났다(리뷰 2라운드).
   if (resume && Date.now() - resume.at < RESUME_MS) {
-    items.unshift(`← ${resume.trip.to} 안내 이어가기`)
-    rows = ['__resume', ...rows]
+    items.splice(1, 0, `← ${resume.trip.to} 안내 이어가기`)
+    rows.splice(1, 0, '__resume')
   }
   // 한도가 가까우면 떠나기 전에 알린다. 도중에 끊기는 것보다 낫다.
   if (used >= QUOTA_WARN) {
@@ -782,11 +798,12 @@ type Resume = {
   boardedAt: number; departedAt: number; approach: string; approachStatus: number
   lastSeen: string; prevSeen: string; atStatus: number; note: string; origin: string
 }
+// 두 갈래다. resume는 출발역 목록의 '이어가기'(실수로 여정을 나갔을 때). repickFrom은 주행 중 다시 고르기에서 돌아갈 추적.
+// 하나로 쓰다가, 버린 여정 A가 새 여정 B의 열차 목록에서 더블탭하면 되살아났다(리뷰 2라운드).
 let resume: Resume | null = null
+let repickFrom: Resume | null = null
 const RESUME_MS = 5 * 60_000
-async function resumeTrip(): Promise<void> {
-  const r = resume!
-  resume = null
+async function resumeTrip(r: Resume): Promise<void> {
   stopOriginWatch()
   ;({ trip, legIndex, stops, train, fixes, boardedAt, departedAt, approach, approachStatus, lastSeen, prevSeen, atStatus, note, origin } = r)
   log('resume', r.mode, r.trip.to)
@@ -806,20 +823,31 @@ const snapshot = (): Resume => ({
   at: Date.now(), mode, trip: trip!, legIndex, stops, train, fixes: fixes.map(f => ({ ...f })),
   boardedAt, departedAt, approach, approachStatus, lastSeen, prevSeen, atStatus, note, origin,
 })
-// 주행 중에 열차를 다시 고르러 가면(놓침 탭, 메뉴) 지금 추적을 남겨 둔다. 목록에서 더블탭하면 그대로 돌아온다.
-// 출발 직후 2분의 탭은 '못 탔으면 다음 열차'라, 타고 있는데 실수로 탭하면 추적을 잃었다.
+// 주행 중에 열차를 다시 고르러 가면(놓침 탭, 메뉴) 지금 추적을 남겨 둔다. 목록 맨 위 '← 타고 있음 · 계속 안내',
+// 더블탭, 또는 20초 동안 아무것도 안 고르면 그대로 돌아온다. 실수 탭으로 하차 안내를 잃지 않는다(리뷰 2라운드).
 async function repick(why: string): Promise<void> {
-  resume = snapshot()
+  repickFrom = snapshot()
   log('repick', why)
   stopPolling()
   return showPick(false)
 }
+async function backToRide(why: string): Promise<void> {
+  const r = repickFrom
+  repickFrom = null
+  if (!r) return
+  log('back to ride', why)
+  return resumeTrip(r)
+}
 
-async function showOrigin(): Promise<void> {
-  if (trip && (mode === 'riding' || mode === 'transfer' || mode === 'pick')) {
-    if (!(mode === 'pick' && resume)) resume = snapshot()   // 다시 고르던 중이면 그 전 추적을 남긴다
-    log('left trip, resumable', resume!.mode, trip.to)
-  }
+// intentional: 메뉴의 '처음으로'처럼 일부러 나갔다. 되돌리기를 남기지 않는다.
+async function showOrigin(intentional = false): Promise<void> {
+  if (trip && (mode === 'riding' || mode === 'transfer' || mode === 'pick') && !intentional) {
+    const base = repickFrom ?? snapshot()
+    // 같은 여정을 또 나가면 5분을 새로 주지 않는다
+    resume = resume && resume.trip === base.trip ? { ...base, at: resume.at } : base
+    log('left trip, resumable', resume.mode, trip.to)
+  } else if (intentional) resume = null
+  repickFrom = null
   mode = 'origin'
   trip = null
   train = null
@@ -929,7 +957,7 @@ async function chooseRoute(dest: string): Promise<void> {
   rows = options.map((_, i) => String(i))
   const liked = prefs.get(`${origin}>${dest}`)
   const mark = (p: Plan) => (routeKey(p) === liked ? '★ ' : '')
-  const head = (p: Plan) => `${mark(p)}${p.legs[0].line} ${p.legs[0].stops[1]}방면`
+  const head = (p: Plan) => `${mark(p)}${p.legs[0].line} ${p.legs[0].stops[1]} 방면`
   // 어디서 갈아타는지가 선택의 핵심이다. '환승 2'만으로는 두 길을 구별할 수 없었다.
   const via = (p: Plan) => (p.legs.length > 1 ? `${p.legs.slice(1).map(l => l.stops[0]).join('·')} 환승` : '직통')
   // '약'은 붙이지 않는다. 행마다 넘침 여부가 달라 어떤 행엔 붙고 어떤 행엔 빠지는 것이 더 어색했다.
@@ -939,7 +967,7 @@ async function chooseRoute(dest: string): Promise<void> {
     options.map(p => `${head(p)}  ${tripMinutes(p)}분`),
   )
   log('options', items.join(' / '))
-  if (!(await showList(items, () => S.listHead(Date.now(), `→ ${dest}`, '경로')))) {
+  if (!(await showList(items, () => S.listHead(Date.now(), `${origin} → ${dest}`, `→ ${dest}`, '경로')))) {
     rows = []
     await showLive(() => S.notice(Date.now(), '노선 목록을 표시하지 못했습니다', '', '탭: 도착지 다시 고르기'))
   }
@@ -997,14 +1025,8 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0): Promise<v
   const gen = pickGen
   const from = stops[0]
   const ln = leg().line
-  // 새벽에는 열차가 없다. 조회해 봐야 '아직 없음'을 되풀이할 뿐이다.
-  const hour = Number(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul', hour: 'numeric', hour12: false })) % 24
-  if (hour >= 1 && hour < 5 && !MOCK_API) {
-    rows = []
-    return showLive(() => S.notice(Date.now(), '지금은 운행 시간이 아닙니다', '첫차는 5시 30분 무렵입니다', '탭: 다시 확인\n더블탭: 뒤로', `${from} ${ln}`))
-  }
   // 조회에 시간이 걸린다. 탭이 먹혔다는 것을 먼저 보여준다.
-  if (!quiet) await showLive(() => S.loading(Date.now(), `${ln} 열차 확인 중`, '', '', from))
+  if (!quiet) await showLive(() => S.loading(Date.now(), `${ln} 열차 확인 중`, '', backHint(), from))
   const hold = () => (quiet ? new Promise<void>(r => later(r, Math.max(0, routeShownAt + ROUTE_HOLD_MS - Date.now()))) : null)
   let all: Arrival[]
   try {
@@ -1019,37 +1041,43 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0): Promise<v
       const until = Date.now() + e.waitSec * 1000
       retryPick(e.waitSec + 1, 'burst')
       return showLive(() => S.loading(Date.now(), '조회가 잦아 잠시 쉽니다',
-        `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 자동으로 다시 확인`, '더블탭: 뒤로', from))
+        `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`, backHint(), from))
     }
     // 한도 소진은 기다려도 낫지 않는다. 자정까지는 앱이 할 수 있는 게 없다.
-    if (e instanceof QuotaError) return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · KST 자정에 초기화`, '더블탭: 뒤로'))
-    if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, 'KST 자정에 초기화됩니다', '더블탭: 뒤로'))
+    if (e instanceof QuotaError) return showLive(() => S.notice(Date.now(), e.message, `오늘 ${used}/${QUOTA_DAY} · KST 자정에 초기화`, backHint()))
+    if (e instanceof ApiError) return showLive(() => S.notice(Date.now(), e.message, 'KST 자정에 초기화됩니다', backHint()))
     const wait = FAST_POLL ? 5 : 20
     const until = Date.now() + wait * 1000
     retryPick(wait, 'error')
     return showLive(() => S.loading(Date.now(), '도착 정보를 받지 못했습니다',
-      `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 자동으로 다시 확인`, '탭: 지금 확인\n더블탭: 뒤로', from))
+      `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`, `탭: 지금 확인\n${backHint()}`, from))
   }
   if (queuedDouble || gen !== pickGen) return   // 사용자가 이미 다른 데로 갔다
   picksAt = Date.now()
-  const candidates = pickCandidates(all)
+  const candidates = pickCandidates(all, repickFrom?.train?.trainNo)
   log('candidates', candidates.length, '| 다음역', stops[1], '| 온 방면', all.filter(a => a.line === ln).map(a => a.toward).join(',') || '없음',
     '| 조회이름', arrivalName(from), walkSec ? `| 걸어서 ${walkSec}초` : '')
 
   if (!candidates.length) {
     rows = []
+    // 새벽(01~05시)에 조회가 비었으면 운행이 끝난 것이다. 시각만으로 막으면 1시 넘어 달리는 막차를 막았다(리뷰 2라운드).
+    const hour = Number(new Date().toLocaleString('en-US', { timeZone: 'Asia/Seoul', hour: 'numeric', hour12: false })) % 24
+    if (hour >= 1 && hour < 5 && !MOCK_API) {
+      log('no trains at night')
+      return showLive(() => S.notice(Date.now(), '지금은 운행 시간이 아닙니다', '첫차는 5시 30분 무렵입니다', `탭: 다시 확인\n${backHint()}`, `${from} ${ln}`))
+    }
     // 앱이 알아서 다시 본다. 간격을 늘려 가다가 10분이 지나면 멈춘다. 막차가 끝났을 수 있다(리뷰 1라운드: 무한 재조회).
     if (!emptySince) emptySince = Date.now()
     const waited = Date.now() - emptySince
     if (waited > (FAST_POLL ? 40_000 : 600_000)) {
       log('no trains, stop retrying after', Math.round(waited / 1000) + 's')
-      return showLive(() => S.notice(Date.now(), '열차가 오지 않습니다', '막차가 끝났을 수 있습니다', '탭: 다시 확인\n더블탭: 뒤로', `${from} ${ln}`))
+      return showLive(() => S.notice(Date.now(), '열차가 오지 않습니다', '막차가 끝났을 수 있습니다', `탭: 다시 확인\n${backHint()}`, `${from} ${ln}`))
     }
     const wait = FAST_POLL ? 8 : waited < 120_000 ? 30 : 60
     const until = Date.now() + wait * 1000
     retryPick(wait, 'no candidates')
-    return showLive(() => S.loading(Date.now(), '오는 열차가 아직 없습니다',
-      [`${stops[1] ?? toward()} 방면 ·`, `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`], '탭: 지금 확인\n더블탭: 뒤로', `${from} ${ln}`))
+    return showLive(() => S.loading(Date.now(), `${stops[1] ?? toward()} 방면 열차가 아직 없습니다`,
+      `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`, `탭: 지금 확인\n${backHint()}`, `${from} ${ln}`))
   }
   emptySince = 0
   // 환승 뒤 자동 진행: 걸어서 닿을 수 있는 첫 열차를 태운다. 닿을 열차가 없으면 목록을 보인다.
@@ -1059,14 +1087,18 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0): Promise<v
   } else if (candidates.length === 1 && autoBoard) return board(candidates[0])
 
   await showPickList(candidates, from, ln)
-  // 목록을 보는 동안 20초마다 다시 조회한다. 떠난 열차는 빠지고 새 열차가 들어온다. 5분 뒤에는 멈춘다(조회 예산).
-  schedulePickRefresh(gen, Date.now() + 5 * 60_000)
+  // 목록을 보는 동안 20초마다 다시 조회한다. 떠난 열차는 빠지고 새 열차가 들어온다. 10분 뒤에는 멈춘다(조회 예산).
+  schedulePickRefresh(gen, Date.now() + 10 * 60_000)
+  // 주행 중에 다시 고르러 왔는데 20초 동안 아무것도 안 고르면 원래 추적으로 돌아간다(실수 탭 대비).
+  if (repickFrom) later(() => { if (gen === pickGen && mode === 'pick' && repickFrom && !busy) void backToRide('timeout') }, 20_000)
 }
 
 // 같은 노선, 같은 방향만. 방향은 "…방면" 역이 다음 역과 같은지로 가른다. updnLine은 읽지 않는다.
 // 이름 표기가 어긋나 0대가 되면 방향을 거르지 않는다. "도착 정보 없음"으로 막히는 것보다 낫다.
-function pickCandidates(all: Arrival[]): Arrival[] {
-  const sameLine = all.filter(a => a.trainNo && a.line === leg().line)
+// 이 역을 이미 떠난 열차(arvlCd 2)와 놓친 열차(exclude)는 뺀다. 떠난 열차를 '곧 도착'으로 맨 위에 두고
+// 후보가 하나면 자동으로 태웠다(리뷰 2라운드).
+function pickCandidates(all: Arrival[], exclude?: string): Arrival[] {
+  const sameLine = all.filter(a => a.trainNo && a.line === leg().line && a.code !== 2 && a.trainNo !== exclude)
   const sameWay = sameLine.filter(a => a.toward === stops[1])
   return (sameWay.length ? sameWay : sameLine).sort((a, b) => a.etaSec - b.etaSec).slice(0, 18)
 }
@@ -1083,7 +1115,12 @@ async function showPickList(candidates: Arrival[], from: string, ln: string): Pr
   picks = candidates
   rows = candidates.map(a => a.trainNo)
   const items = S.tiers(...[0, 1, 2].map(l => candidates.map(a => pickLabel(a, l))))
-  pickShown = items.join('\n')
+  // 다시 그릴지는 열차 번호가 바뀌었는지로 정한다. 분 표기만 바뀌어도 다시 그리면 커서가 맨 위로 돌아갔다(리뷰 2라운드).
+  pickShown = candidates.map(a => a.trainNo).join(',')
+  if (repickFrom) {
+    items.unshift('← 타고 있음 · 계속 안내')
+    rows.unshift('__back')
+  }
   if (!(await showList(items, () => S.listHead(Date.now(), `${from} ${ln}`, ln)))) {
     rows = []
     retryPick(FAST_POLL ? 5 : 15, 'list failed')
@@ -1091,16 +1128,19 @@ async function showPickList(candidates: Arrival[], from: string, ln: string): Pr
   }
 }
 function schedulePickRefresh(gen: number, until: number): void {
+  pickRefreshing = true
   later(async () => {
-    if (gen !== pickGen || mode !== 'pick' || busy || !picks.length || Date.now() > until) return
+    if (gen !== pickGen || mode !== 'pick' || busy || !picks.length || Date.now() > until) { pickRefreshing = false; return }
     try {
       const all = await arrivals(stops[0])
       if (gen !== pickGen || mode !== 'pick' || busy) return
-      picksAt = Date.now()
-      const next = pickCandidates(all)
-      const items = S.tiers(...[0, 1, 2].map(l => next.map(a => pickLabel(a, l))))
-      // 바뀐 것이 있을 때만 다시 그린다. 다시 그리면 목록의 선택 위치가 처음으로 돌아간다.
-      if (next.length && items.join('\n') !== pickShown) { log('pick refresh', next.length); await showPickList(next, stops[0], leg().line) }
+      const next = pickCandidates(all, repickFrom?.train?.trainNo)
+      // 열차 번호가 바뀔 때만 다시 그린다(떠난 열차가 빠지거나 새 열차가 들어올 때). 도착 시각 기준도 그때만 바꾼다.
+      if (next.length && next.map(a => a.trainNo).join(',') !== pickShown) {
+        picksAt = Date.now()
+        log('pick refresh', next.length)
+        await showPickList(next, stops[0], leg().line)
+      }
     } catch (e) { log('pick refresh failed', e) }
     schedulePickRefresh(gen, until)
   }, FAST_POLL ? 8_000 : 20_000)
@@ -1113,6 +1153,7 @@ let emptySince = 0       // 열차가 없다고 처음 본 시각. 10분이 지�
 let pickGen = 0
 let autoRepicks = 0
 let pickRetrying = false
+let pickRefreshing = false
 function retryPick(sec: number, why: string): void {
   const g = pickGen
   pickRetrying = true
@@ -1126,6 +1167,7 @@ async function board(a: Arrival): Promise<void> {
   boardedAt = picksAt || Date.now()
   departedAt = 0
   resume = null
+  repickFrom = null
   approach = ''
   fixes = []
   atStatus = -1
@@ -1177,11 +1219,22 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
           stopPolling()
           return showPick(true)
         }
+        // 탄 뒤에 열차가 피드에서 사라졌다. 폴링은 느려지고(pollDelay), 10분이 넘으면 멈춘다.
+        // 끝없이 15초마다 조회하던 것을 막는다(리뷰 2라운드).
+        const lastFix = fixes[fixes.length - 1]
+        if (lastFix && Date.now() - (lastFix.seen ?? lastFix.at) > 10 * 60_000) {
+          log('train lost for 10 min, stop')
+          stopPolling()
+          mode = 'arrived'
+          rows = []
+          return showLive(() => S.notice(Date.now(), '열차 정보가 끊겼습니다', '10분 넘게 실시간 정보에 없습니다', '탭: 처음으로\n더블탭: 종료', leg().line))
+        }
       } else if (me.status === 3 && me.station === stops[0] && !fixes.length) {
         // 전역출발: 앞 역을 떠나 출발역으로 오는 중이다. 아직 타지 않았다.
         misses = 0
         approach = me.station
         approachStatus = 3
+        approachAt = me.at
         log('train approaching', me.station, '접근', 'at', new Date(me.at).toTimeString().slice(0, 8))
       } else if (stops.includes(me.station)) {
         // 전역출발(3)은 경로상 한 역 앞을 떠난 것이다. 이 역에 닿은 것으로 치면 위치가 한 역 앞서간다.
@@ -1209,6 +1262,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         misses = 0
         approach = me.station
         approachStatus = me.status
+        approachAt = me.at
         log('train approaching', me.station, 'at', new Date(me.at).toTimeString().slice(0, 8))
       } else {
         // 타고 있는데 경로 밖 역이 관측됐다. 반대 방향, 지나침, 지선 이탈 중 하나다.
@@ -1282,10 +1336,13 @@ function applyDeviation(d: Deviation, seen: string, at: number): void {
 // 주행 중 탭 메뉴. 8초 뒤 스스로 닫힌다. 두 정거장 전이 되면 곧바로 닫힌다(폴링에서).
 // 메뉴가 열린 채로 하차 안내를 가리면 안 된다(리뷰 1라운드: 안경을 고쳐 쓰다 탭이 들어가면 하차 안내가 안 떴다).
 let menuTimer: ReturnType<typeof setTimeout> | null = null
+let menuUntil = 0
 async function showMenu(): Promise<void> {
   menuOpen = true
   rows = [...MENU]
-  if (!(await showList([...MENU], () => S.listHead(Date.now(), `${leg().line} · 메뉴`, '메뉴')))) { menuOpen = false; await render(); return }
+  menuUntil = Date.now() + 8000
+  // 메뉴가 예고 없이 사라지지 않게 머리줄에 닫힘 초읽기를 둔다(리뷰 2라운드).
+  if (!(await showList([...MENU], () => S.listHead(Date.now(), `${Math.max(0, Math.ceil((menuUntil - Date.now()) / 1000))}초 뒤 닫힘`, '메뉴')))) { menuOpen = false; await render(); return }
   if (menuTimer) clearTimeout(menuTimer)
   menuTimer = later(() => closeMenu('timeout'), 8000)
 }
@@ -1341,11 +1398,15 @@ async function renderNow(): Promise<void> {
     // 아직 타지 않았다. 열차가 오는 중이거나, 열차를 못 찾았다.
     // 세 번 연속 못 찾기 전에는 오류로 단정하지 않는다. 한 번 놓친 것은 흔하다.
     if (approach || misses < 3) {
-      const n = approach ? hops(leg().line, approach, stops[0]) : -1
-      const where = approach ? `${approach} ${S.statusWord(approachStatus)}`.trim() + (n > 0 ? ` · ${n}정거장 전` : '') : ''
+      // 열차가 어디 있는지 보이면 도착 예정을 그 위치로 다시 센다. 도착 정보(조회 시각 기준)는 금방 낡는다.
+      // '1정거장 전'인데 '약 5분'이라고 했다(리뷰 2라운드). 한 정거장 약 110초, 역에 서 있으면 30초를 더한다.
+      const n = !approach ? -1 : approachStatus === 3 && approach === stops[0] ? 1 : hops(leg().line, approach, stops[0])
+      const observed = n >= 0 && approachAt ? approachAt + n * 110_000 + (approachStatus === 0 || approachStatus === 1 ? 30_000 : 0) : 0
       return show(S.waiting({
         now, line: leg().line, toward: train!.dest || train!.toward,
-        at: where, from: stops[0], arriveAt: boardedAt + train!.etaSec * 1000,
+        at: approach ? `${approach} ${S.statusWord(approachStatus)}`.trim() : '',
+        away: n > 0 && approach !== stops[0] ? `${n}정거장 전` : undefined,
+        from: stops[0], arriveAt: observed || boardedAt + train!.etaSec * 1000,
         refresh: refresh(), hint: hintNow(),
       }))
     }
@@ -1415,6 +1476,8 @@ async function arrive(): Promise<void> {
   if (nextLeg) {
     mode = 'transfer'
     startTransferWatch()
+    // 최종 도착 예정은 지금 한 번 정해 고정한다(현재시각으로 세면 매분 밀렸다). 걷기·기다림을 환승 1회 4분으로 친다.
+    const finalAt = Date.now() + restMinutes(legIndex + 1) * 60_000
     return showLive(() => S.transfer({
       now: Date.now(), note: note || undefined,
       station: stops[stops.length - 1],
@@ -1422,7 +1485,7 @@ async function arrive(): Promise<void> {
       // 환승 뒤 첫 구간의 다음 역. 승강장 표지와 같은 기준이라 그 자리에서 확인된다.
       toward: nextLeg.stops[1] ?? nextLeg.stops[nextLeg.stops.length - 1],
       rest: trip!.legs.slice(legIndex + 1).reduce((n, l) => n + l.stops.length - 1, 0),
-      minutes: restMinutes(legIndex + 1),
+      finalAt,
       finalDest: trip!.to,
     }))
   }
@@ -1485,7 +1548,8 @@ async function onTap(index: number): Promise<void> {
   if (mode === 'origin') {
     const pick = rows[index]
     if (!pick) return showOrigin()   // 안내행이나 실패 화면은 rows가 비어 있다
-    if (pick === '__resume' && resume) return resumeTrip()
+    if (pick === '__resume' && resume) { const r = resume; resume = null; return resumeTrip(r) }
+    resume = null   // 새 여정을 시작한다. 옛 여정은 버린다
     stopOriginWatch()
     origin = pick
     return showDest()
@@ -1500,6 +1564,7 @@ async function onTap(index: number): Promise<void> {
     return p ? startTrip(p) : showDest()
   }
   if (mode === 'pick') {
+    if (rows[index] === '__back') return backToRide('tap')
     const a = picks.find(p => p.trainNo === rows[index])
     return a ? board(a) : showPick()          // 실패 화면에서 탭하면 다시 확인
   }
@@ -1511,7 +1576,7 @@ async function onTap(index: number): Promise<void> {
       const pick = rows[index]
       if (pick === '현위치에서 재탐색') return replanHere()
       if (pick === '열차 다시 고르기') return repick('menu')
-      if (pick === '처음으로') return showOrigin()
+      if (pick === '처음으로') return showOrigin(true)
       return render()   // 계속 보기 또는 알 수 없는 행
     }
     // 출발 직후라면 탭 한 번이 '다음 열차'다. 놓쳤을 때 메뉴를 거치지 않는다.
@@ -1527,6 +1592,13 @@ async function onTap(index: number): Promise<void> {
 // 탭은 버린다. 목록 번호가 바뀐 다음 화면에 떨어지면 엉뚱한 것을 고른다.
 let queuedDouble = false
 
+const tapState = (): DoubleTapState => ({
+  mode, menuOpen, legIndex, boarded: !!train, hasTrip: !!trip, textPage: pageIsText,
+  confirming: Date.now() < confirmUntil, repick: !!repickFrom && mode === 'pick',
+})
+// 열차 고르기 화면들의 더블탭 안내. 실제 동작과 같은 말을 쓴다.
+const backHint = () => doubleTapHint({ ...tapState(), textPage: true })
+
 let lastInputAt = Date.now()
 async function handle(type: OsEventTypeList, index: number): Promise<void> {
   lastInputAt = Date.now()
@@ -1536,18 +1608,19 @@ async function handle(type: OsEventTypeList, index: number): Promise<void> {
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) {
       // 루트 화면의 더블탭은 반드시 종료여야 한다 (Even Hub 요구사항)
       // 도착 화면도 '더블탭: 종료'라고 적혀 있다. 예전에는 처음으로 가서 문구와 달랐다.
-      if (mode === 'origin' || mode === 'arrived') {
+      const action = doubleTapAction(tapState())
+      log('double tap', mode, action)
+      if (action === 'exit') {
         stopPolling(); stopOriginWatch(); stopTransferWatch()
         await bridge.shutDownPageContainer(1)
-      } else if (menuOpen) closeMenu('double tap')
+      } else if (action === 'closeMenu') closeMenu('double tap')
       // 목록에서는 한 단계 뒤로. 처음으로 튀지 않는다(리뷰 1라운드).
-      else if (mode === 'dest') await showOrigin()
-      else if (mode === 'line') await showDest()
-      // 주행 중에 다시 고르러 왔다면 더블탭은 원래 추적으로 돌아가기다.
-      else if (mode === 'pick' && resume?.mode === 'riding' && Date.now() - resume.at < RESUME_MS) await resumeTrip()
-      else if (mode === 'pick' && legIndex === 0 && !train) await (options.length > 1 ? chooseRoute(trip!.to) : showDest())
+      else if (action === 'toOrigin') await showOrigin()
+      else if (action === 'toDest') await showDest()
+      else if (action === 'toRoute') await (options.length > 1 ? chooseRoute(trip!.to) : showDest())
+      else if (action === 'backToRide') await backToRide('double tap')
       // 여정이 있는 텍스트 화면은 한 번 더 묻는다. 목록 화면은 확인 문구를 띄울 자리가 없어 되돌리기(5분)로 대신한다.
-      else if (trip && pageIsText && Date.now() > confirmUntil) {
+      else if (action === 'confirm') {
         confirmUntil = Date.now() + 3000
         if (mode === 'riding') await render()
         else if (current) await show(current())
@@ -1603,7 +1676,10 @@ let idleMode: Mode = mode
 let idleSince = Date.now()
 const idleTimer = every(() => {
   if (mode !== idleMode) { idleMode = mode; idleSince = Date.now() }
-  const idle = mode === 'origin' || mode === 'dest' || mode === 'line' || mode === 'arrived' || (mode === 'pick' && !picks.length && !!emptySince && !pickRetrying)
+  // 주행·환승, 그리고 재조회나 목록 갱신이 도는 열차 고르기만 바쁘다. 나머지는 모두 한가한 화면이다
+  // (새벽 안내, 한도 안내, 갱신을 멈춘 목록도 끝없이 쓰던 빈틈을 막는다, 리뷰 2라운드).
+  const active = mode === 'riding' || mode === 'transfer' || (mode === 'pick' && (pickRetrying || pickRefreshing))
+  const idle = !active
   if (!idle || busy || Date.now() - Math.max(lastInputAt, idleSince) < IDLE_EXIT_MS) return
   log('idle exit', mode)
   stopPolling(); stopOriginWatch(); stopTransferWatch()

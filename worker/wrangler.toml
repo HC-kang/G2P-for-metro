@@ -23,3 +23,7 @@ head_sampling_rate = 1
 binding = "DB"
 database_name = "metro-logs"
 database_id = "680c8dae-dc44-48c4-bf66-5ef8a75b393d"
+
+# 하루 한 번 03:00 KST(18:00 UTC)에 14일 지난 기록을 지운다.
+[triggers]
+crons = ["0 18 * * *"]

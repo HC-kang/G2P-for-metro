@@ -21,16 +21,27 @@ const cors = {
 // 기기 카운터만 있으면 토큰이 샜을 때 남이 한도를 다 써도 모른다. 950건에서 막고 남은 50건은 여유로 둔다.
 const DAILY_CAP = 950
 const kstDay = () => new Date(Date.now() + 9 * 3600_000).toISOString().slice(0, 10)
+// D1 오류를 삼키면 상한이 조용히 꺼진다(리뷰 2라운드). 오류는 로그에 남기고, 앱에는 헤더를 보내지 않는다('서버 집계 없음').
 async function usedToday(env) {
-  if (!env.DB) return 0
-  const row = await env.DB.prepare('SELECT n FROM usage WHERE day = ?').bind(kstDay()).first().catch(() => null)
-  return row?.n ?? 0
+  if (!env.DB) return -1
+  try {
+    const row = await env.DB.prepare('SELECT n FROM usage WHERE day = ?').bind(kstDay()).first()
+    return row?.n ?? 0
+  } catch (e) {
+    console.log('[quota] usage read failed', String(e))
+    return -1
+  }
 }
 async function countCall(env) {
-  if (!env.DB) return 0
-  const row = await env.DB.prepare('INSERT INTO usage (day, n) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET n = n + 1 RETURNING n')
-    .bind(kstDay()).first().catch(() => null)
-  return row?.n ?? 0
+  if (!env.DB) return -1
+  try {
+    const row = await env.DB.prepare('INSERT INTO usage (day, n) VALUES (?, 1) ON CONFLICT(day) DO UPDATE SET n = n + 1 RETURNING n')
+      .bind(kstDay()).first()
+    return row?.n ?? -1
+  } catch (e) {
+    console.log('[quota] usage write failed', String(e))
+    return -1
+  }
 }
 
 // 앱이 쓰는 필드만 남긴다. 위치 응답은 노선 전체라 크다. train을 주면 그 열차만.
@@ -49,6 +60,13 @@ const reply = (body, status, extra = {}) =>
   new Response(body, { status, headers: { ...cors, ...extra } })
 
 export default {
+  // 하루 한 번(03:00 KST) 14일 지난 기록을 지운다. 앱을 안 쓰는 동안에도 '14일 보관'이 지켜진다(리뷰 2라운드).
+  async scheduled(_event, env) {
+    if (!env.DB) return
+    await env.DB.prepare("DELETE FROM logs WHERE at < strftime('%Y-%m-%dT%H:%M:%fZ', 'now', '-14 days')").run()
+    await env.DB.prepare('DELETE FROM usage WHERE day < ?').bind(new Date(Date.now() - 30 * 86400_000).toISOString().slice(0, 10)).run()
+  },
+
   async fetch(request, env, ctx) {
     if (request.method === 'OPTIONS') return reply(null, 204)
 
@@ -64,6 +82,8 @@ export default {
         // 저장이 실패해도 앱에는 성공으로 답한다. 로그 때문에 앱이 재시도를 쌓으면 안 된다.
         try {
           await env.DB.prepare('INSERT INTO logs (session, kind, body) VALUES (?, ?, ?)').bind(session, kind, text).run()
+          // D1에 남겼으면 Cloudflare 작업 로그에는 찍지 않는다. 좌표가 두 곳에 남지 않게 한다(리뷰 2라운드).
+          return reply(null, 204)
         } catch (e) {
           console.log('[log] d1 insert failed', String(e))
         }
@@ -111,6 +131,8 @@ export default {
     // 한도 소진은 HTTP 200으로 온다. tail에서 바로 보이게 남긴다.
     if (raw.includes('ERROR-337')) console.log('[quota] 일일 1000건 한도 소진')
     const body = kind === 'position' ? slimPositions(raw, url.searchParams.get('train')) : raw
-    return reply(body, res.status, { 'Content-Type': 'application/json; charset=utf-8', 'x-metro-used': String(used) })
+    const headers = { 'Content-Type': 'application/json; charset=utf-8' }
+    if (used >= 0) headers['x-metro-used'] = String(used)
+    return reply(body, res.status, headers)
   },
 }

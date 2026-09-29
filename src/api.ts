@@ -18,6 +18,7 @@ export type Arrival = {
   trainNo: string; station: string; line: string
   etaSec: number; msg: string; toward: string; dest: string; express: boolean
   last: boolean   // 막차(lstcarAt=1). 목록에 표시한다
+  code: number    // arvlCd: 0 진입, 1 도착, 2 출발, 3 전역출발, 4 전역진입, 5 전역도착, 99 운행 중. 2면 이미 떠났다
 }
 
 // "광운대행 - 시청방면"           -> "시청"
@@ -102,6 +103,7 @@ export function parseArrivals(body: unknown): Arrival[] {
     dest: destOf(String(r.trainLineNm ?? '')),
     express: String(r.btrainSttus ?? '').includes('급행'),
     last: String(r.lstcarAt ?? '') === '1',
+    code: r.arvlCd == null || r.arvlCd === '' ? -1 : Number(r.arvlCd),
   }))
 }
 
@@ -158,7 +160,8 @@ const post = (text: string, kind: 'live' | 'trail', keepalive: boolean): Promise
     body: text,
     keepalive,
   }).then(r => r.ok, () => false)
-const logs = REPORTING ? batcher(text => post(text, 'live', true)) : null
+// 주행 중에는 폴링 직후에 보낸다(flushLog). 예비 타이머는 60초라, 매분 기록이 통신을 따로 깨우는 일이 드물다(리뷰 2라운드).
+const logs = REPORTING ? batcher(text => post(text, 'live', true), { everyMs: 60_000 }) : null
 let ended = false
 // 폰 설정의 '진단 기록 자동 보고' 스위치. 꺼져 있으면 모으지도 보내지도 않는다.
 let reportOn = true
@@ -196,7 +199,7 @@ const get = async (path: string): Promise<unknown> => {
   if (n > 0) onServerUsed(n)
   if (res.status === 403) throw new Error('앱 설정이 서버와 맞지 않습니다')
   // 워커가 오늘 한도 가까이 막았다. 토큰이 새도 남이 한도를 다 쓰지 못하게 하는 장치다.
-  if (res.status === 429) throw new ApiError('ERROR-337', CODE_MESSAGE['ERROR-337'] ?? '오늘 조회 한도를 다 썼습니다')
+  if (res.status === 429) throw new ApiError('ERROR-337', '오늘 조회 한도(950건)를 다 썼습니다')
   if (!res.ok) throw new Error(`서버 ${res.status}`)
   return res.json()
 }

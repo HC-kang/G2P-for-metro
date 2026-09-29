@@ -10,6 +10,15 @@ const ok = (s: string, what: string) => {
   assert.ok(S.bytes(s) <= S.PAGE_BYTES, `${what}: ${S.bytes(s)}바이트\n${s}`)
   assert.ok(S.cols(s) <= S.MAX_COLS, `${what}: ${S.cols(s)}칸\n${s}`)
   assert.ok(s.split('\n').length <= S.MAX_LINES, `${what}: ${s.split('\n').length}줄\n${s}`)
+  // 줄 머리나 끝에 구분점이 떨어지면 안 된다(리뷰 2라운드)
+  // 진행 띠의 생략 표시 '··'는 글리프라 뺀다
+  for (const l of s.split('\n')) assert.ok(!/^\s*·(?!·)|(?<!·)·\s*$/.test(l), `${what}: 줄 머리·끝에 '·'\n${s}`)
+}
+// 조작 안내가 있는 화면은 늘 마지막 줄이 조작 안내다(9·10줄 고정)
+const tailPinned = (s: string, what: string) => {
+  const ls = s.split('\n')
+  assert.equal(ls.length, S.MAX_LINES, `${what}: 꼬리가 맨 아래에 고정되지 않았다\n${s}`)
+  assert.ok(/탭|더블탭|갱신/.test(ls[ls.length - 1]), `${what}: 마지막 줄이 조작 안내가 아니다\n${s}`)
 }
 
 const riding = (over: Partial<Parameters<typeof S.riding>[0]> = {}) => S.riding({
@@ -18,8 +27,8 @@ const riding = (over: Partial<Parameters<typeof S.riding>[0]> = {}) => S.riding(
   stopsLeft: 4, paceMs: 120_000, pathLen: 7, index: 3, estimated: 0, legAt: T + 8 * 60_000, ...over,
 })
 
-const waiting = () => S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산 출발 · 2정거장 전', from: '노원', arriveAt: T + 180_000, refresh: R })
-const transfer = () => S.transfer({ now: T, station: '교대', from: '2호선', to: '3호선', toward: '경복궁', rest: 3, minutes: 10, finalDest: '안국' })
+const waiting = () => S.waiting({ now: T, line: '7호선', toward: '장암', at: '수락산 출발', away: '2정거장 전', from: '노원', arriveAt: T + 180_000, refresh: R })
+const transfer = () => S.transfer({ now: T, station: '교대', from: '2호선', to: '3호선', toward: '경복궁', rest: 3, finalAt: T + 10 * 60_000, finalDest: '안국' })
 const lost = () => S.lost({ now: T, last: '선릉', agoSec: 52, guess: '역삼', dest: '강남', stopsLeft: 3, bar: S.track(6, 3, 2), refresh: R })
 const alight = (n: number) => S.alight({ now: T, stopsLeft: n, dest: '하계', next: '중계', arriveAt: T + n * 2 * 60_000, refresh: R })
 
@@ -135,7 +144,7 @@ test('alight는 남은 정거장에 따라 말을 바꾸고, 문장에는 자간
   assert.ok(two.includes('두 정거장 뒤 내리세요'), two)
   assert.ok(one.includes('다음 역에서 내리세요'), one)
   assert.ok(one.includes('18:44 도착 예정'), one)
-  assert.ok(two.includes('다음 중계 · 하계까지 약 4분'), two)
+  assert.ok(two.includes('다음 중계 · 약 4분'), two)
   // 도착 예정이 지났으면 지난 시각 대신 행동을 말한다
   assert.ok(S.alight({ now: T, stopsLeft: 1, dest: '하계', next: '중계', arriveAt: T - 5000, refresh: R }).includes('곧 도착'))
   assert.ok(!two.replace(/ /g, '').includes('다음다음'), '어색한 말이 남아 있습니다')
@@ -146,8 +155,8 @@ test('alight는 남은 정거장에 따라 말을 바꾸고, 문장에는 자간
 test('transfer는 환승 뒤 남은 여정을 보여준다', () => {
   const s = transfer()
   assert.ok(s.includes('3호선') && s.includes('경복궁'))
-  assert.ok(s.includes('안국 18:52 도착') && s.includes('3정거장'), s)
-  assert.ok(s.includes('방면 승강장으로'), s)
+  assert.ok(s.includes('안국 약 18:52 도착 · 3정거장'), s)
+  assert.ok(s.includes('3호선 경복궁 방면'), s)
   // 사용자에게 다음 열차를 고르라고 시키지 않는다. 앱이 찾는다고 말한다.
   assert.ok(s.includes('다음 열차를 찾는 중') && !s.includes('다음 열차 고르기'), s)
   ok(s, 'transfer')
@@ -175,7 +184,7 @@ test('모든 화면이 현재시각을 밝히고 한도를 지킨다', () => {
     ['arrived', S.arrived(T, '하계')],
     ['transfer', transfer()], ['waiting', waiting()], ['lost', lost()],
     ['notice', S.notice(T, '머리말', '본문입니다', '탭: 처음으로\n더블탭: 종료')],
-    ['loading', S.loading(T, ['공릉(서울산업대입구)에', '오는 열차가 아직 없습니다'], ['동대문역사문화공원 방면 ·', '30초 뒤 다시 확인'], '탭: 지금 확인\n  더블탭: 처음으로')],
+    ['loading', S.loading(T, ['공릉(서울산업대입구)에', '오는 열차가 아직 없습니다'], ['동대문역사문화공원 방면', '30초 뒤 다시 확인'], '탭: 지금 확인\n  더블탭: 처음으로')],
     ['loading 짧게', S.loading(T, '노원', '수인분당선 열차 확인 중')],
   ]
   for (const [name, s] of screens) {
@@ -237,13 +246,14 @@ test('route 화면은 한도 경고를 붙일 수 있다', () => {
 })
 
 // 기다리는 화면에는 반드시 스피너가 돈다. 1초마다 한 칸씩 파도가 흐르고 여섯 칸 뒤 처음으로.
-test('기다리는 화면의 스피너는 매초 다른 모양이고 안경 폰트에 있는 글리프만 쓴다', () => {
-  const frames = [0, 1, 2, 3, 4, 5].map(i => S.spin(T + i * 1000))
-  assert.equal(new Set(frames).size, 6)
-  assert.equal(S.spin(T + 6000), frames[0])
-  for (const f of frames) assert.match(f, /^[▁▃▅▇]{4}$/)
+test('기다리는 화면의 스피너는 막대 하나가 매초 옆으로 흐르고, 하는 일 문구 끝에 붙는다', () => {
+  const frames = [0, 1, 2, 3].map(i => S.spin(T + i * 1000))
+  assert.equal(new Set(frames).size, 4)
+  assert.equal(S.spin(T + 4000), frames[0])
+  for (const f of frames) assert.ok(/^[▁▇]{4}$/.test(f) && [...f].filter(c => c === '▇').length === 1, f)
   const a = S.loading(T, '노원', '7호선 열차 확인 중'), b = S.loading(T + 1000, '노원', '7호선 열차 확인 중')
-  assert.ok(a.split('\n')[2].includes(frames[0]) && b.split('\n')[2].includes(frames[1]), a + '\n' + b)
+  const line = (x: string, f: string) => x.split('\n').find(l => l.includes(f)) ?? ''
+  assert.ok(line(a, frames[0]).includes('7호선 열차 확인 중') && line(b, frames[1]).includes('7호선 열차 확인 중'), a + '\n' + b)
   const noFix = S.waiting({ now: T, line: '7호선', toward: '장암', at: '', from: '노원', arriveAt: T + 180_000, refresh: R })
   assert.ok(noFix.includes(S.spin(T)) && transfer().includes(S.spin(T)), '기다리는 화면에 스피너가 없습니다')
 })
@@ -261,13 +271,14 @@ test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', asyn
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, note: '지선 이탈', refresh: R, estimated: true }), `alight2 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 1, dest: n, next: n, arriveAt: T + 120_000, refresh: R }), `alight1 ${n}`)
     ok(S.arrived(T, n), `arrived ${n}`)
-    ok(S.transfer({ now: T, station: n, from: line, to: '9호선', toward: n, rest: 23, minutes: 50, finalDest: n, note: '반대 방향' }), `transfer ${n}`)
+    ok(S.transfer({ now: T, station: n, from: line, to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n, note: '반대 방향' }), `transfer ${n}`)
+    ok(S.transfer({ now: T, station: n, from: '9호선', to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n }), `transfer 반대 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R }), `alight 환승 ${n}`)
-    ok(S.waiting({ now: T, line, toward: n, at: `${n} 출발 · 12정거장 전`, from: n, arriveAt: T + 300_000, refresh: R }), `waiting ${n}`)
+    ok(S.waiting({ now: T, line, toward: n, at: `${n} 출발`, away: '12정거장 전', from: n, arriveAt: T + 300_000, refresh: R }), `waiting ${n}`)
     ok(S.lost({ now: T, last: n, agoSec: 200, guess: n, dest: n, stopsLeft: 12, bar: S.track(13, 3, 2), refresh: R }), `lost ${n}`)
     const legs = [{ line, stops: [n, n] }, { line, stops: [n, n] }, { line, stops: [n, n] }]
     ok(S.route({ now: T, from: n, to: n, legs, stops: 30, minutes: 60, quota: '오늘 조회 850/1000' }), `route ${n}`)
-    ok(S.loading(T, [`${n}에`, '오는 열차가 아직 없습니다'], [`${n} 방면 ·`, '30초 뒤 다시 확인'], '탭: 지금 확인\n  더블탭: 처음으로'), `loading ${n}`)
+    ok(S.loading(T, [`${n}에`, '오는 열차가 아직 없습니다'], [`${n} 방면`, '30초 뒤 다시 확인'], '탭: 지금 확인\n  더블탭: 처음으로'), `loading ${n}`)
     ok(S.notice(T, `${n}에서 내리세요`, '여기서는 목적지까지 경로를 찾지 못했습니다', '탭: 처음으로\n  더블탭: 종료'), `stranded ${n}`)
     ok(S.notice(T, '경로를 찾지 못했습니다', `${n} → ${n}`, '탭: 도착지 다시 고르기'), `noroute ${n}`)
     for (const h of [S.listHead(T, `${n} →`, '목적지'), S.listHead(T, `→ ${n}`, '경로'), S.listHead(T, `${n} ${line}`, line)]) ok(h, `listHead ${n}`)
@@ -316,4 +327,13 @@ test('분 단위 시계(절전)에서는 갱신 줄이 매초 바뀌지 않는�
     assert.equal(a, '15초마다 갱신')
     assert.ok(!S.riding({ now: T, line: '7호선', at: { station: '하계', label: '도착' }, refresh: R, next: '공릉', legDest: '청담', stopsLeft: 14, paceMs: 120000, pathLen: 15, index: 0, estimated: 0, legAt: T + 1_680_000 }).includes(':00:'), '초가 보이면 안 된다')
   } finally { S.clock.seconds = true }
+})
+
+test('조작 안내는 모든 화면에서 맨 아래 줄에 고정된다', () => {
+  for (const [name, x] of [
+    ['riding', riding()], ['riding 환승', riding({ transfer: { line: '3호선', finalDest: '강남', finalAt: T + 22 * 60_000 } })],
+    ['alight2', alight(2)], ['alight1', alight(1)], ['arrived', S.arrived(T, '하계')], ['transfer', transfer()],
+    ['waiting', waiting()], ['lost', lost()], ['notice', S.notice(T, '머리말', '본문', '탭: 처음으로\n더블탭: 종료')],
+    ['loading', S.loading(T, '오는 열차가 아직 없습니다', '7초 뒤 다시 확인', '탭: 지금 확인\n더블탭: 뒤로', '하계 7호선')],
+  ] as [string, string][]) tailPinned(x, name)
 })

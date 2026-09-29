@@ -159,3 +159,13 @@ test('위치와 도착 방면의 역 이름을 경로 이름으로 읽는다', a
   const a = parseArrivals({ realtimeArrivalList: [{ subwayId: '1007', statnNm: '청담', trainLineNm: '장암행 - 뚝섬유원지방면', btrainNo: '7296', barvlDt: '60' }] })
   assert.equal(a[0].toward, '자양', '방면이 어긋나면 반대 방향 열차까지 후보에 섞인다')
 })
+
+test('도착 정보에서 이미 떠난 열차(arvlCd 2)를 가려낸다', async () => {
+  const { parseArrivals } = await import('./api.ts')
+  const a = parseArrivals({ realtimeArrivalList: [
+    { subwayId: '1007', statnNm: '하계', trainLineNm: '석남행 - 공릉방면', btrainNo: '7119', barvlDt: '0', arvlCd: '2' },
+    { subwayId: '1007', statnNm: '하계', trainLineNm: '석남행 - 공릉방면', btrainNo: '7121', barvlDt: '240', arvlCd: '99' },
+  ] })
+  assert.equal(a[0].code, 2)
+  assert.equal(a[1].code, 99)
+})
