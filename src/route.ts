@@ -235,3 +235,15 @@ export function deviation(leg: Leg, seen: string, prev: string | null, status: n
   const at = status <= 1 || !forward ? seen : forward
   return { kind: 'getOff', at, plan: at === dest ? null : plan(at, dest), reason }
 }
+
+// 이 열차가 하차역까지 가는가. 행선지(dest)가 하차역 앞에서 끝나거나 다른 지선이면 아니다(리뷰 3라운드:
+// 신도림에서 인천 쪽으로 가는데 천안행을, 천호에서 마천 쪽으로 가는데 하남검단산행을 자동으로 태울 수 있었다).
+// 모르는 이름이면 막지 않는다. 순환선(2호선)과 응암 루프(6호선)는 최단 거리로 방향을 가를 수 없어 행선지만 본다.
+export function reaches(line: string, stops: string[], dest: string): boolean {
+  const o = stops[0], x = stops[stops.length - 1]
+  if (!dest || dest === x) return true
+  if (stops.includes(dest)) return false   // 경로 위, 하차역 앞에서 끝난다
+  if (line === '2호선' || line === '6호선') return true
+  const od = hops(line, o, dest, 200), ox = hops(line, o, x, 200), xd = hops(line, x, dest, 200)
+  return od < 0 || ox < 0 || xd < 0 || ox + xd === od
+}

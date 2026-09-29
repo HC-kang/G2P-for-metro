@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { plan, stopsLeft } from './route.ts'
+import { plan, reaches, stopsLeft } from './route.ts'
 
 const shape = (from: string, to: string) =>
   plan(from, to)?.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' ') ?? '실패'
@@ -139,4 +139,15 @@ test('같은 노선 위 정거장 수를 센다', async () => {
   assert.equal(hops('7호선', '중계', '하계'), 1)
   assert.equal(hops('7호선', '하계', '청담'), 14)
   assert.equal(hops('7호선', '하계', '없는역'), -1)
+})
+
+test('자동 탑승은 하차역까지 가는 열차만 고른다(행선지·지선)', () => {
+  assert.equal(reaches('1호선', ['신도림', '구로', '부평'], '인천'), true)
+  assert.equal(reaches('1호선', ['신도림', '구로', '부평'], '천안'), false)    // 구로에서 갈라지는 다른 지선
+  assert.equal(reaches('5호선', ['천호', '강동', '둔촌동'], '하남검단산'), false)   // 강동에서 갈라지는 다른 지선
+  assert.equal(reaches('5호선', ['천호', '길동'], '하남검단산'), true)
+  assert.equal(reaches('5호선', ['천호', '거여'], '마천'), true)
+  assert.equal(reaches('7호선', ['하계', '공릉', '태릉입구', '먹골'], '태릉입구'), false)   // 하차역 앞에서 끝남
+  assert.equal(reaches('7호선', ['하계', '공릉', '태릉입구'], '석남'), true)
+  assert.equal(reaches('7호선', ['하계', '공릉'], '모르는역'), true)             // 모르면 막지 않는다
 })

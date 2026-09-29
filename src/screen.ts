@@ -88,6 +88,9 @@ const hero = (s: string, used: number): string => {
 }
 
 const PAD = '  '
+// 'HH:MM 도착 · 약 N분'의 N은 보이는 두 시각(도착 HH:MM, 현재 HH:MM)의 차다. 초로 반올림하면 도착 시각은 그대로인데
+// 분이 1→2로 거꾸로 가는 일이 있었다(리뷰 3라운드).
+const minsTo = (at: number, now: number): number => Math.max(1, Math.floor(at / 60_000) - Math.floor(now / 60_000))
 const IN = '      '
 
 // 한 줄에 들어가면 한 줄로, 넘치면 두 줄로 쓴다.
@@ -147,7 +150,15 @@ const wrap = (line: string): string[] => {
     out.push(rest.slice(0, at).join('').trimEnd())
     rest = [...indent, ...rest.slice(at).join('').trimStart()]
   }
-  return [...out, rest.join('')]
+  // 마지막 줄에 한 어절만 남으면('…아직 / 없습니다') 윗줄의 마지막 어절을 함께 내린다(리뷰 3라운드).
+  const last = rest.join('')
+  const prev = out[out.length - 1]
+  if (prev && !last.trim().includes(' ')) {
+    const cut = prev.lastIndexOf(' ')
+    const moved = `${indent}${prev.slice(cut + 1)} ${last.trimStart()}`
+    if (cut > indent.length && cols(moved) <= MAX_COLS) return [...out.slice(0, -1), prev.slice(0, cut), moved]
+  }
+  return [...out, last]
 }
 
 // 화면 하나를 통째로 쓴다. 빈 줄이 위계를 만든다.
@@ -242,7 +253,7 @@ export function riding(a: {
   legAt: number          // 이번 구간 끝(하차·환승) 예정 시각. 마지막 관측에 고정한다(현재시각으로 세면 톱니처럼 흔들렸다)
   hint?: string          // 맨 아래 조작 안내. 기본 '탭: 메뉴'
 }): string {
-  const left = Math.max(1, Math.round((a.legAt - a.now) / 60_000))
+  const left = minsTo(a.legAt, a.now)
   return page([
     // 경로를 바꿨거나 내려야 하면 머리줄에 짧게 밝힌다.
     a.note ? fitHead(a.now, `${a.line} · ${a.note}`, a.note) : head(a.now, a.line),
@@ -255,7 +266,7 @@ export function riding(a: {
     ...(a.transfer
       ? [
           ...joinOrSplit(`${a.legDest} 환승 ${when(a.now, a.legAt)}`, `${a.stopsLeft}정거장`),
-          ...joinOrSplit(`→ ${a.transfer.line}`, `${a.transfer.finalDest} ${hhmm(a.transfer.finalAt)} 도착`),
+          ...joinOrSplit(`→ ${a.transfer.line}`, finalLine(a.transfer.finalDest, a.transfer.finalAt)),
         ]
       : [
           ...pair(a.legDest, `${when(a.now, a.legAt)} 도착`),
@@ -263,6 +274,10 @@ export function riding(a: {
         ]),
   ], [`${PAD}${refreshLine(a.refresh)}`, `${PAD}${a.hint ?? '탭: 메뉴'}`])
 }
+
+// 최종 도착. 환승이 섞여 추정이라 '약'. 긴 역 이름(동대문역사문화공원)이면 '도착'을 뺀다(한 줄 32칸).
+const finalLine = (dest: string, at: number): string =>
+  [`${dest} 약 ${hhmm(at)} 도착`, `${dest} 약 ${hhmm(at)}`].find(t => cols(`${PAD}${t}`) <= MAX_COLS) ?? `${dest} 약 ${hhmm(at)}`
 
 // 예정 시각. 이미 지났으면 지난 시각 대신 '곧'이라고 한다. 지난 시각을 보이면 앱이 멈춘 것처럼 읽힌다.
 const when = (now: number, at: number) => (at - now < 30_000 ? '곧' : hhmm(at))
@@ -275,6 +290,7 @@ const when = (now: number, at: number) => (at - now < 30_000 ? '곧' : hhmm(at))
 export function alight(a: {
   now: number; stopsLeft: number; dest: string; next: string; arriveAt: number
   note?: string; then?: string; estimated?: boolean; refresh: Refresh; hint?: string
+  seenMin?: number   // 신호가 끊겼다. 마지막 관측이 몇 분 전인지
 }): string {
   const verb = a.then ? '갈아타세요' : '내리세요'
   const title = a.stopsLeft <= 1 ? `다음 역에서 ${verb}` : `두 정거장 뒤 ${verb}`
@@ -284,6 +300,7 @@ export function alight(a: {
   const detail = a.stopsLeft <= 1
     ? [`${PAD}${soon ? '곧 도착 · 문 쪽으로 이동하세요' : `${hhmm(a.arriveAt)} 도착 예정${est}`}`]
     : joinOrSplit(`다음 ${a.next}${est}`, `약 ${Math.max(1, Math.round((a.arriveAt - a.now) / 60_000))}분`)
+  if (a.seenMin) detail.push(`${PAD}신호 끊김 ${a.seenMin}분째`)
   // 강조 블록: 역 이름과 그에 붙는 한 줄은 IN. 나머지 설명은 PAD. 하차·환승·도착 화면 공통.
   return page([head(a.now, a.note ?? (a.then ? '환승' : '하차')), '', `${PAD}${title}`, '',
     `${IN}${hero(a.dest, 6)}`, a.then ? `${IN}${ro(a.then)} 환승` : null, '', ...detail],
@@ -308,7 +325,7 @@ export function transfer(a: { now: number; station: string; from: string; to: st
   ], [
     // 사용자에게 시키지 않는다. 타던 열차가 떠나면 앱이 다음 열차를 찾는다. 탭은 지름길일 뿐이다.
     `${PAD}다음 열차를 찾는 중  ${spin(a.now)}`,
-    `${PAD}탭: 지금 다음 열차 찾기`,
+    `${PAD}탭: 지금 찾기`,
   ])
 }
 
@@ -317,7 +334,7 @@ export function transfer(a: { now: number; station: string; from: string; to: st
 // at: 열차가 지금 있는 곳('중계 출발 · 1정거장 전'). 주행 화면과 같은 표기다('현재'를 붙이지 않는다).
 export function waiting(a: { now: number; line: string; toward: string; at: string; away?: string; from: string; arriveAt: number; refresh: Refresh; hint?: string }): string {
   const eta = a.arriveAt - a.now >= 30_000
-    ? `${hhmm(a.arriveAt)} 도착 · 약 ${Math.max(1, Math.round((a.arriveAt - a.now) / 60_000))}분`
+    ? `${hhmm(a.arriveAt)} 도착 · 약 ${minsTo(a.arriveAt, a.now)}분`
     : `곧 도착`
   return page([
     head(a.now, context(a.now, a.line, a.toward)), '',

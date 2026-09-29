@@ -134,7 +134,7 @@ test('riding은 추정 구간임을 밝힌다', () => {
 test('riding은 환승이 있으면 환승과 최종 도착을 보여준다', () => {
   const s = riding({ transfer: { line: '3호선', finalDest: '강남', finalAt: T + 22 * 60_000 } })
   assert.ok(s.includes('교대 환승 18:50 · 4정거장'), s)
-  assert.ok(s.includes('→ 3호선 · 강남 19:04 도착'), s)          // 18:42 + 22분
+  assert.ok(s.includes('→ 3호선 · 강남 약 19:04 도착'), s)          // 18:42 + 22분
   assert.ok(s.split('\n').includes(''), '빈 줄이 남아 위계가 선다')
   ok(s, 'riding 환승')
 })
@@ -274,6 +274,8 @@ test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', asyn
     ok(S.transfer({ now: T, station: n, from: line, to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n, note: '반대 방향' }), `transfer ${n}`)
     ok(S.transfer({ now: T, station: n, from: '9호선', to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n }), `transfer 반대 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R }), `alight 환승 ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R, estimated: true, seenMin: 12 }), `alight 끊김 환승 ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 1, dest: n, next: n, arriveAt: T + 120_000, refresh: R, estimated: true, seenMin: 12 }), `alight 끊김 ${n}`)
     ok(S.waiting({ now: T, line, toward: n, at: `${n} 출발`, away: '12정거장 전', from: n, arriveAt: T + 300_000, refresh: R }), `waiting ${n}`)
     ok(S.lost({ now: T, last: n, agoSec: 200, guess: n, dest: n, stopsLeft: 12, bar: S.track(13, 3, 2), refresh: R }), `lost ${n}`)
     const legs = [{ line, stops: [n, n] }, { line, stops: [n, n] }, { line, stops: [n, n] }]
@@ -336,4 +338,12 @@ test('조작 안내는 모든 화면에서 맨 아래 줄에 고정된다', () =
     ['waiting', waiting()], ['lost', lost()], ['notice', S.notice(T, '머리말', '본문', '탭: 처음으로\n더블탭: 종료')],
     ['loading', S.loading(T, '오는 열차가 아직 없습니다', '7초 뒤 다시 확인', '탭: 지금 확인\n더블탭: 뒤로', '하계 7호선')],
   ] as [string, string][]) tailPinned(x, name)
+})
+
+test('접힌 문장의 마지막 줄에 한 어절만 남지 않는다', () => {
+  const t = S.notice(0, '동묘앞 방면 열차가 아직 없습니다', '10분 넘게 실시간 정보에 없습니다', '')
+  for (const l of t.split('\n')) assert.ok(S.cols(l) <= S.MAX_COLS, l)
+  assert.ok(t.includes('아직 없습니다') && t.includes('정보에 없습니다'), t)
+  const d = S.waiting({ now: Date.UTC(2026, 8, 30, 0, 46, 10), line: '7호선', toward: '석남', at: '', from: '하계', arriveAt: Date.UTC(2026, 8, 30, 0, 47, 50), refresh: { inSec: 5, totalSec: 15, failed: false } })
+  assert.ok(d.includes('도착 · 약 1분'), d)   // 보이는 시각 차(09:47−09:46)와 같다
 })

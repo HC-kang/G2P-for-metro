@@ -33,3 +33,9 @@ export function doubleTapHint(s: DoubleTapState): string {
     : a === 'toRoute' || a === 'toDest' || a === 'toOrigin' ? '더블탭: 뒤로'
     : '더블탭: 처음으로'
 }
+
+// 목표 시각에 가장 가까운 것. 자동 다시 고르기가 원래 예정 시각에 가장 가까이 오는 열차를 고를 때 쓴다(리뷰 3라운드).
+// 같은 거리면 앞의 것(먼저 오는 열차)이다.
+export function closest<T>(xs: T[], at: (x: T) => number, target: number): T {
+  return xs.reduce((b, x) => (Math.abs(at(x) - target) < Math.abs(at(b) - target) ? x : b))
+}

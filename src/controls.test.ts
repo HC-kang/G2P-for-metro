@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { doubleTapAction, doubleTapHint, type DoubleTapState } from './controls.ts'
+import { closest, doubleTapAction, doubleTapHint, type DoubleTapState } from './controls.ts'
 
 const base: DoubleTapState = { mode: 'origin', menuOpen: false, legIndex: 0, boarded: false, hasTrip: false, textPage: false, confirming: false, repick: false }
 const at = (o: Partial<DoubleTapState>) => doubleTapAction({ ...base, ...o })
@@ -40,4 +40,11 @@ test('화면의 더블탭 안내는 실제 동작과 같다', () => {
   assert.equal(doubleTapHint({ ...base, mode: 'pick', hasTrip: true, legIndex: 1, textPage: true }), '더블탭: 처음으로')
   assert.equal(doubleTapHint({ ...base, mode: 'pick', hasTrip: true, repick: true, boarded: true }), '더블탭: 계속 안내')
   assert.equal(doubleTapHint({ ...base, mode: 'arrived' }), '더블탭: 종료')
+})
+
+test('자동 다시 고르기는 원래 예정 시각에 가장 가까운 열차를 고른다', () => {
+  const trains = [{ no: 'A', at: 60 }, { no: 'B', at: 200 }, { no: 'C', at: 420 }]
+  assert.equal(closest(trains, t => t.at, 180).no, 'B')
+  assert.equal(closest(trains, t => t.at, 0).no, 'A')
+  assert.equal(closest(trains, t => t.at, 130).no, 'A')   // 같은 거리면 먼저 오는 열차
 })

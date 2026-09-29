@@ -28,6 +28,7 @@
       html, body {
         margin: 0;
         min-height: 100%;
+        word-break: keep-all; overflow-wrap: anywhere;   /* 한국어는 어절 단위로 끊는다('따라/갑니다' 방지) */
         background: var(--paper);
         color: var(--ink);
         font-family: -apple-system, BlinkMacSystemFont, "Apple SD Gothic Neo", "Noto Sans KR", system-ui, sans-serif;
@@ -139,7 +140,7 @@
         <strong>안경에서 쓰는 법</strong>
         <p class="step"><span>1</span><span>안경 메뉴에서 G2P for Metro를 켜면 가까운 역이 뜹니다.</span></p>
         <p class="step"><span>2</span><span>출발역과 아래의 자주 가는 곳을 탭하면, 열차를 알아서 따라갑니다.</span></p>
-        <p class="step"><span>3</span><span>내릴 때와 갈아탈 때 두 정거장 전부터 알려 줍니다. 주행 중 탭은 메뉴입니다.</span></p>
+        <p class="step"><span>3</span><span>내릴 때와 갈아탈 때 두 정거장 전부터 알려 줍니다. 주행 중 탭은 메뉴입니다. 출발 뒤 2분 동안은 탭이 '못 탔으면 다음 열차'입니다.</span></p>
         <p class="foot">1~9호선과 수도권 전철(경의중앙·수인분당·신분당·공항철도·경춘·서해·신림·우이신설 등)을 안내합니다. 인천·김포·용인·의정부 경전철은 실시간 정보가 없어 안내하지 못합니다.</p>
       </section>
       <h1>자주 가는 곳</h1>
