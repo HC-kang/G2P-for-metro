@@ -1594,14 +1594,20 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
 
 // 할 일 없는 화면을 10분 동안 아무도 안 만지면 앱을 끝낸다. 매초 시계를 쓰는 BLE와 배터리를 아낀다(리뷰 1라운드).
 // 여정 중(주행·환승·열차 고르기)은 끝내지 않는다. 열차가 안 와서 재조회를 멈춘 화면은 한가한 화면이다.
+// 기준은 마지막 입력과 화면(모드)이 바뀐 때 중 늦은 쪽이다. 마지막 입력만 보면 주행 내내 안경을 안 만진
+// 사용자는 도착하자마자(16초 만에) 앱이 꺼졌다(장시간 시험에서 발견).
 const IDLE_EXIT_MS = 10 * 60_000
-every(() => {
+let idleMode: Mode = mode
+let idleSince = Date.now()
+const idleTimer = every(() => {
+  if (mode !== idleMode) { idleMode = mode; idleSince = Date.now() }
   const idle = mode === 'origin' || mode === 'dest' || mode === 'line' || mode === 'arrived' || (mode === 'pick' && !picks.length && !!emptySince && !pickRetrying)
-  if (!idle || busy || Date.now() - lastInputAt < IDLE_EXIT_MS) return
+  if (!idle || busy || Date.now() - Math.max(lastInputAt, idleSince) < IDLE_EXIT_MS) return
   log('idle exit', mode)
   stopPolling(); stopOriginWatch(); stopTransferWatch()
+  clearInterval(ticker); clearInterval(idleTimer)   // 종료를 한 번만 요청한다. 호스트가 안 닫아도 매분 되풀이하지 않는다
   void bridge.shutDownPageContainer(1)
-}, 60_000)
+}, 30_000)
 
 // 안경 배터리를 주행 중 5분마다 남긴다. 한 시간 주행의 %/h를 실제 로그로 잰다(리뷰 1라운드: 수치가 없다).
 async function logBattery(why: string): Promise<void> {
