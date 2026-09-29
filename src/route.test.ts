@@ -95,8 +95,15 @@ test('locate는 STALE_MS를 넘으면 stale이다', () => {
   assert.equal(locate(S, f, 90_000 + 179_000)!.stale, false)
 })
 
-test('locate는 경로 끝을 넘지 않는다', () => {
-  assert.equal(locate(S, [{ station: 'D', at: 0 }], 10_000_000)!.index, S.length - 1)
+test('locate의 추정은 하차역 바로 앞에서 멈추고, 하차역은 관측으로만 도착한다', () => {
+  // 추정으로 도착을 선언하면 폴링이 멈추거나 열차보다 먼저 환승 화면이 떴다
+  assert.equal(locate(S, [{ station: 'D', at: 0 }], 10_000_000)!.index, S.length - 2)
+  assert.equal(locate(S, [{ station: S[S.length - 1], at: 0 }], 1000)!.index, S.length - 1)
+})
+
+test('관측이 역을 건너뛰어도 속도는 한 역 40초 밑으로 내려가지 않는다', async () => {
+  const { paceMs, MIN_PACE_MS } = await import('./route.ts')
+  assert.equal(paceMs(S, [{ station: S[0], at: 0 }, { station: S[4], at: 14_000 }]), MIN_PACE_MS)
 })
 
 test('locate는 관측이 없으면 null을 준다', () => {

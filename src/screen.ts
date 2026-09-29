@@ -207,6 +207,7 @@ export function riding(a: {
   next: string; legDest: string; stopsLeft: number; paceMs: number
   pathLen: number; index: number; estimated: number
   transfer?: { line: string; finalDest: string; finalMinutes: number }
+  foot?: string
 }): string {
   const left = mins(a.paceMs, a.stopsLeft)
   return screen(
@@ -228,17 +229,19 @@ export function riding(a: {
           ...pair(a.legDest, `${hhmm(a.now + left * 60_000)} 도착`),
           `${PAD}${a.stopsLeft}정거장 · 약 ${left}분`,
         ]),
+    a.foot ? `${PAD}${a.foot}` : null,
   )
 }
 
 // 하차 임박. 화면 전체를 이 한 가지에 내준다.
 // then: 여기서 갈아탈 노선. 환승역인데 최종 하차와 똑같이 보이면 어디로 갈아타는지 모른다.
-export function alight(a: { now: number; stopsLeft: number; dest: string; next: string; minutes: number; note?: string; then?: string }): string {
+export function alight(a: { now: number; stopsLeft: number; dest: string; next: string; minutes: number; note?: string; then?: string; foot?: string }): string {
   const title = a.stopsLeft <= 1 ? '다 음 역 에 서  내 립 니 다' : '두  정 거 장  뒤'
   const foot = a.stopsLeft <= 1 ? `${hhmm(a.now + a.minutes * 60_000)} 도착` : `${a.next} 다음 · 약 ${a.minutes}분`
   const indent = a.stopsLeft <= 1 ? PAD + PAD : IN
   return screen(head(a.now, a.note ?? (a.then ? '환승' : '')), '', `${indent}${title}`, '',
-    `${IN}${PAD}${hero(a.dest, 8)}`, a.then ? `${IN}${PAD}${ro(a.then)} 환승` : null, '', `${indent}${foot}`)
+    `${IN}${PAD}${hero(a.dest, 8)}`, a.then ? `${IN}${PAD}${ro(a.then)} 환승` : null, '', `${indent}${foot}`,
+    a.foot ? '' : null, a.foot ? `${PAD}${a.foot}` : null)
 }
 
 export function arrived(now: number, dest: string): string {
@@ -278,7 +281,7 @@ export function waiting(a: { now: number; line: string; toward: string; at: stri
 }
 
 // 관측이 끊겼다. 추정임을 화면이 스스로 말한다.
-export function lost(a: { now: number; last: string; agoSec: number; guess: string; dest: string; stopsLeft: number; bar: string; refresh: Refresh }): string {
+export function lost(a: { now: number; last: string; agoSec: number; guess: string; dest: string; stopsLeft: number; bar: string; refresh: Refresh; foot?: string }): string {
   return screen(
     head(a.now, '신호 끊김'),
     `${PAD}마지막 관측  ${a.last}  ${ago(a.agoSec)}`,
@@ -286,7 +289,7 @@ export function lost(a: { now: number; last: string; agoSec: number; guess: stri
     `${PAD}추정   ${hero(a.guess, 14)} 부근`, '',
     `${PAD}${a.bar}`,
     ...pair(a.dest, `${a.stopsLeft}정거장 남음`), '',
-    `${PAD}탭: 메뉴`,
+    `${PAD}${a.foot ?? '탭: 메뉴'}`,
   )
 }
 

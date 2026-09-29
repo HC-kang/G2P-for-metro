@@ -114,8 +114,12 @@ export function paceMs(stops: string[], fixes: Fix[]): number {
   const last = uniq[uniq.length - 1]
   const n = Math.abs(stops.indexOf(last.station) - stops.indexOf(first.station))
   if (n < 1) return DEFAULT_PACE_MS
-  return Math.round((last.at - first.at) / n)
+  // 서울 지하철 역간은 1~3분이다. 급행이 역을 건너뛰어도 한 역에 40초 밑으로는 안 내려간다.
+  // 관측이 몇 역을 건너뛴 채 짧은 간격으로 들어오면 3초/역 같은 값이 나와 도착을 앞당겼다(09-29 시뮬레이터).
+  return Math.min(MAX_PACE_MS, Math.max(MIN_PACE_MS, Math.round((last.at - first.at) / n)))
 }
+export const MIN_PACE_MS = 40_000
+export const MAX_PACE_MS = 300_000
 
 export type Guess = { index: number; estimated: number; stale: boolean }
 
@@ -126,7 +130,10 @@ export function locate(stops: string[], fixes: Fix[], now: number): Guess | null
   const base = stops.indexOf(last.station)
   const elapsed = now - last.at
   const pushed = Math.floor(Math.max(0, elapsed) / paceMs(stops, fixes))
-  const index = Math.min(base + pushed, stops.length - 1)
+  // 추정은 하차역 바로 앞까지만 민다. 하차역(환승역) 도착은 관측으로만 선언한다.
+  // 추정으로 도착을 선언하면 폴링이 멈추거나, 열차가 앞 역에 있는데 환승 화면이 떴다.
+  const cap = base >= stops.length - 1 ? base : stops.length - 2
+  const index = Math.min(base + pushed, cap)
   return { index, estimated: index - base, stale: elapsed > STALE_MS }
 }
 

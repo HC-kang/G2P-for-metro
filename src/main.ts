@@ -815,12 +815,11 @@ async function chooseRoute(dest: string): Promise<void> {
   const head = (p: Plan) => `${mark(p)}${p.legs[0].line} ${p.legs[0].stops[1]}방면`
   // 어디서 갈아타는지가 선택의 핵심이다. '환승 2'만으로는 두 길을 구별할 수 없었다.
   const via = (p: Plan) => (p.legs.length > 1 ? `${p.legs.slice(1).map(l => l.stops[0]).join('·')} 환승` : '직통')
-  // ★가 붙으면 4바이트가 늘어 환승역이 빠졌다. 가장 중요한 행이다. '약'부터 버린다.
+  // '약'은 붙이지 않는다. 행마다 넘침 여부가 달라 어떤 행엔 붙고 어떤 행엔 빠지는 것이 더 어색했다.
   const items = S.tiers(
-    options.map(p => `${head(p)}  ${via(p)} · 약 ${tripMinutes(p)}분`),
     options.map(p => `${head(p)}  ${via(p)} · ${tripMinutes(p)}분`),
-    options.map(p => `${head(p)}  환승 ${p.legs.length - 1} · 약 ${tripMinutes(p)}분`),
-    options.map(p => `${head(p)}  약 ${tripMinutes(p)}분`),
+    options.map(p => `${head(p)}  환승 ${p.legs.length - 1} · ${tripMinutes(p)}분`),
+    options.map(p => `${head(p)}  ${tripMinutes(p)}분`),
   )
   log('options', items.join(' / '))
   if (!(await showList(items, () => S.listHead(Date.now(), `→ ${dest}`, '경로')))) {
@@ -1127,7 +1126,9 @@ function flashNote(text: string, ms = 6000): void {
   note = text
   later(() => { if (note === text) { note = ''; void render() } }, ms)
 }
-let lastDouble = 0
+let confirmUntil = 0
+const CONFIRM = '더블탭 한 번 더: 처음으로'
+const foot = () => (Date.now() < confirmUntil ? CONFIRM : undefined)
 
 async function render(): Promise<void> {
   if (rendering || menuOpen) return
@@ -1169,7 +1170,7 @@ async function renderNow(): Promise<void> {
       guess: stops[guess.index],
       dest, stopsLeft: left,
       bar: S.track(stops.length, guess.index, guess.estimated),
-      refresh: refresh(),
+      refresh: refresh(), foot: foot(),
     }))
   }
 
@@ -1178,7 +1179,7 @@ async function renderNow(): Promise<void> {
       now, stopsLeft: left, dest, next: stops[guess.index + 1],
       minutes: Math.max(1, Math.round((pace * left) / 60_000)),
       note: note || undefined,
-      then: trip!.legs[legIndex + 1]?.line,
+      then: trip!.legs[legIndex + 1]?.line, foot: foot(),
     }))
   }
 
@@ -1192,7 +1193,7 @@ async function renderNow(): Promise<void> {
     at, refresh: refresh(),
     next: stops[guess.index + 1],
     legDest: dest, stopsLeft: left, paceMs: pace,
-    pathLen: stops.length, index: guess.index, estimated: guess.estimated,
+    pathLen: stops.length, index: guess.index, estimated: guess.estimated, foot: foot(),
     transfer: nextLeg
       ? {
           line: nextLeg.line,
@@ -1331,10 +1332,10 @@ async function handle(type: OsEventTypeList, index: number): Promise<void> {
       if (mode === 'origin' || mode === 'arrived') {
         stopPolling(); stopOriginWatch(); stopTransferWatch()
         await bridge.shutDownPageContainer(1)
-      } else if (mode === 'riding' && fixes.length && Date.now() - lastDouble > 3000) {
+      } else if (mode === 'riding' && fixes.length && Date.now() > confirmUntil) {
         // 타고 있을 때는 실수 한 번으로 안내를 잃지 않게 한 번 더 묻는다. 3초 안에 또 두 번 탭하면 처음으로.
-        lastDouble = Date.now()
-        flashNote('더블탭 한 번 더: 처음으로', 3000)
+        // 머리줄은 32칸이라 문구가 안 들어가 조용히 빠졌다. 본문 맨 아래에 띄운다. 틱이 3초 뒤 지운다.
+        confirmUntil = Date.now() + 3000
         await render()
       } else await showOrigin()
     } else if (type === OsEventTypeList.CLICK_EVENT) {
