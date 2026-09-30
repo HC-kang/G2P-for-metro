@@ -17,7 +17,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
 import { plan, planHop, departures, locate, legEta, hops, paceMs, reaches, approachEta, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
-import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
+import { nearest, distanceM, pointsToNext, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
@@ -643,6 +643,7 @@ function stopPolling(): void {
   pollGen += 1
   if (pollTimer) clearTimeout(pollTimer)
   pollTimer = null
+  stopRideLocation()
 }
 
 // ---------- 출발역 ----------
@@ -713,6 +714,52 @@ async function quickFix(): Promise<Loc | null> {
     }
   }
   return null
+}
+
+// ---------- 주행 중 위치 ----------
+// 09-30까지 주행 중에는 위치를 전혀 쓰지 않았다(지하에서 GPS가 안 잡힌다고 봤다). 그런데 역 승강장에서는 와이파이 측위로
+// 수십 m 정확도가 나온다(09-30 강남구청 출발역 측위 25~30m). 피드는 평균 38초 늦다. 역에 서 있을 때 위치가 다음 역을
+// 가리키면 피드보다 먼저 한 칸 옮긴다. 조건을 엄격히 둔다: 20초 안의 측위, 오차 80m 이하, 다음 역 200m 안이고 지금 역보다
+// 가까움, 지금 역에 닿은 지 40초 넘음, 하차역은 관측으로만. 모든 측위를 기록해 실제로 얼마나 오고 맞는지 배운다.
+let rideLoc: (Loc & { got: number }) | null = null
+let rideLocUnsub: (() => void) | null = null
+let rideLocTimer: ReturnType<typeof setInterval> | null = null
+let rideLocLog = { key: '', at: 0 }
+function onRideLoc(l: Loc): void {
+  if (!Number.isFinite(l.latitude)) return
+  rideLoc = { ...l, got: Date.now() }
+  const near = nearest(l.latitude, l.longitude, COORDS.filter(c => stops.includes(c.name)), 1)[0]
+  const key = near?.name ?? '-'
+  // 가장 가까운 경로 역이 바뀌거나 30초가 지나면 남긴다(기록량을 줄인다)
+  if (key !== rideLocLog.key || Date.now() - rideLocLog.at > 30_000) {
+    rideLocLog = { key, at: Date.now() }
+    log('ride gps', key, near ? Math.round(near.meters) + 'm' : '', 'acc', Math.round(l.accuracy ?? -1), 'age', ageSec(l))
+  }
+}
+function startRideLocation(): void {
+  if (rideLocUnsub || rideLocTimer) return
+  if (simFeed) { rideLocTimer = every(() => { void simLocation().then(l => { if (l) onRideLoc(l) }) }, 3000); return }
+  rideLocUnsub = bridge.onAppLocationChanged(l => onRideLoc(l))
+  Promise.resolve(bridge.startAppLocationUpdates({ accuracy: AppLocationAccuracy.High, intervalMs: 5000 }))
+    .catch(e => log('ride gps unsupported', e))
+}
+function stopRideLocation(): void {
+  if (rideLocTimer) { clearInterval(rideLocTimer); rideLocTimer = null }
+  if (rideLocUnsub) {
+    rideLocUnsub()
+    rideLocUnsub = null
+    Promise.resolve(bridge.stopAppLocationUpdates()).catch(() => {})
+  }
+  rideLoc = null
+}
+// 위치가 지금 역(index)의 다음 역을 가리키는가
+function locSaysNext(index: number, here: Fix, now: number): boolean {
+  const l = rideLoc
+  if (!l || index + 1 > stops.length - 2) return false            // 하차역(환승역) 도착은 관측으로만
+  const next = COORDS.find(c => c.name === stops[index + 1]), cur = COORDS.find(c => c.name === stops[index])
+  if (!next || !cur) return false
+  const ageMs = Math.max(now - l.got, (ageSec(l) ?? 0) * 1000)
+  return pointsToNext({ lat: l.latitude, lon: l.longitude, accM: l.accuracy, ageMs }, cur, next, now - (here.arr ?? here.at))
 }
 
 // 출발역 후보. 위치가 있으면 가까운 순, 불확실하면 지난 도착역·최근 출발역을 앞으로 당긴다.
@@ -1302,8 +1349,10 @@ function schedulePoll(gen: number, ms: number, why: string): void {
 
 // ---------- 추적 ----------
 
+let locSnapAt = ''
 async function poll(gen: number, why = 'timer'): Promise<void> {
   if (gen !== pollGen || mode !== 'riding') return
+  startRideLocation()
   if (!busy) {
     try {
       log('poll', why, 'gen', gen)
@@ -1345,7 +1394,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         const last = fixes[fixes.length - 1]
         const now = Date.now()
         if (!last || last.station !== me.station) {
-          fixes.push({ station: me.station, at: me.at, seen: now, status: me.status })
+          fixes.push({ station: me.station, at: me.at, seen: now, status: me.status, arr: me.at })
           // 열차 이동을 진단 기록에 남긴다. 이게 없으면 주행 중엔 req 줄만 보여 어디쯤인지 모른다.
           log('fix', me.station, S.statusWord(me.status), 'at', new Date(me.at).toTimeString().slice(0, 8), 'left', stopsLeft(stops, me.station), 'pace', Math.round(paceMs(stops, fixes) / 1000) + 's')
         } else {
@@ -1488,7 +1537,7 @@ async function render(): Promise<void> {
 
 async function renderNow(): Promise<void> {
   const now = Date.now()
-  const guess = locate(stops, fixes, now)
+  let guess = locate(stops, fixes, now)
 
   if (!guess) {
     // 아직 타지 않았다. 열차가 오는 중이거나, 열차를 못 찾았다.
@@ -1510,6 +1559,12 @@ async function renderNow(): Promise<void> {
     return show(S.loading(now, '열차를 찾는 중', `${train!.trainNo}번 위치가 아직 안 보입니다`, '탭: 메뉴\n더블탭: 처음으로', leg().line))
   }
 
+  // 피드는 아직 이 역인데 위치가 다음 역을 가리키면 한 칸 옮긴다(라벨 '부근 (위치)')
+  const byLoc = guess.estimated === 0 && !guess.stale && locSaysNext(guess.index, fixes[fixes.length - 1], now)
+  if (byLoc) {
+    if (locSnapAt !== stops[guess.index + 1]) { locSnapAt = stops[guess.index + 1]; log('loc snap', locSnapAt, 'feed', stops[guess.index]) }
+    guess = { ...guess, index: guess.index + 1, estimated: 1 }
+  }
   const left = stopsLeft(stops, stops[guess.index])
   if (left <= 0) return arrive()
 
@@ -1546,7 +1601,7 @@ async function renderNow(): Promise<void> {
   // 도착한 채 1분 반 넘게 서 있으면 '정차 중'이다(지연). 앞으로 밀지 않는다.
   const dwelling = guess.estimated === 0 && lastFix.status === 1 && now - lastFix.at > 90_000
   const at = guess.estimated > 0
-    ? { station: stops[guess.index], label: '부근 (추정)' }
+    ? { station: stops[guess.index], label: byLoc ? '부근 (위치)' : '부근 (추정)' }
     : { station: stops[guess.index], label: dwelling ? '정차 중' : S.statusWord(atStatus) || '통과' }
   await show(S.riding({
     now, line: leg().line, note: note || undefined,

@@ -61,7 +61,7 @@ test('stopsLeft는 남은 정거장 수를 준다', () => {
   assert.equal(stopsLeft(s, 'Z'), -1)
 })
 
-import { paceMs, locate, legEta, approachEta, DWELL_MS, DEFAULT_PACE_MS } from './route.ts'
+import { paceMs, locate, legEta, approachEta, travelMs, DEFAULT_PACE_MS, type Fix } from './route.ts'
 
 const S = ['A', 'B', 'C', 'D', 'E', 'F']
 
@@ -153,28 +153,96 @@ test('자동 탑승은 하차역까지 가는 열차만 고른다(행선지·지
 })
 
 // 09-30 실사용: 역에 이미 도착했는데 이전 역을 가리켰다. 피드는 '출발' 기록을 다음 역에 닿을 때까지 되풀이한다.
-test('출발 기록은 되풀이돼도 떠난 시각부터 세어 다음 역을 추정한다', () => {
-  // 앞 역 기록도 그 역의 마지막 상태(출발) 시각으로 갱신된다. A 출발 10초, B 출발 120초(역당 110초).
-  // 폴링마다 'B 출발'을 다시 본다(seen 갱신)
-  const f = [{ station: 'A', at: 10_000, seen: 10_000, status: 2 }, { station: 'B', at: 120_000, seen: 175_000, status: 2 }]
-  // 떠난 지 40초: 아직 달리는 중. B 출발을 그대로 보인다
-  assert.deepEqual(locate(S, f, 160_000), { index: 1, estimated: 0, stale: false })
-  // 떠난 지 65초(= 역당 110초 - 정차 50초 이후): C에 닿았다고 추정한다. 피드가 아직 'B 출발'이어도
-  assert.deepEqual(locate(S, f, 185_000), { index: 2, estimated: 1, stale: false })
+test('출발 기록은 되풀이돼도 떠난 시각부터 세어, 이 열차의 달리는 시간이 지나면 다음 역을 추정한다', () => {
+  // A: 0초 도착, 60초 출발. B: 100초 도착(달린 시간 40초), 160초 출발. 폴링마다 'B 출발'을 다시 본다(seen 갱신)
+  const f = [{ station: 'A', arr: 0, at: 60_000, seen: 60_000, status: 2 }, { station: 'B', arr: 100_000, at: 160_000, seen: 185_000, status: 2 }]
+  assert.equal(travelMs(S, f), 40_000)
+  assert.equal(paceMs(S, f), 100_000)   // 역에 닿은 시각끼리. 출발 시각을 섞으면 부풀었다
+  // 떠난 지 30초: 아직 달리는 중
+  assert.deepEqual(locate(S, f, 190_000), { index: 1, estimated: 0, stale: false })
+  // 떠난 지 45초(> 40초): C에 닿았다고 추정. 피드가 아직 'B 출발'이어도
+  assert.deepEqual(locate(S, f, 205_000), { index: 2, estimated: 1, stale: false })
   // 피드가 살아 있는 동안에는 한 역까지만 앞선다(열차가 터널에 서 있을 수 있다)
-  const alive = [{ station: 'A', at: 10_000, seen: 10_000, status: 2 }, { station: 'B', at: 120_000, seen: 390_000, status: 2 }]
+  const alive = [f[0], { ...f[1], seen: 390_000 }]
   assert.equal(locate(S, alive, 400_000)!.index, 2)
 })
 
 test('도착 기록이 되풀이되면(정차 중) 밀지 않는다', () => {
-  const f = [{ station: 'A', at: 0, seen: 0, status: 0 }, { station: 'B', at: 120_000, seen: 175_000, status: 1 }]
+  const f = [{ station: 'A', arr: 0, at: 60_000, status: 2 }, { station: 'B', arr: 120_000, at: 120_000, seen: 175_000, status: 1 }]
   assert.deepEqual(locate(S, f, 185_000), { index: 1, estimated: 0, stale: false })
 })
 
-test('하차 예정은 출발 기록이면 그 역의 정차를 뺀다', () => {
-  const arrived = [{ station: 'A', at: 0, status: 0 }, { station: 'B', at: 110_000, status: 1 }]
-  const departed = [{ station: 'A', at: 0, status: 0 }, { station: 'B', at: 110_000, status: 2 }]
-  assert.equal(legEta(S, arrived, 120_000) - legEta(S, departed, 120_000), DWELL_MS)
+test('하차 예정은 출발 기록이면 다음 역까지 달리는 시간, 그 뒤는 역당 시간으로 센다', () => {
+  const f = [{ station: 'A', arr: 0, at: 60_000, status: 2 }, { station: 'B', arr: 100_000, at: 160_000, status: 2 }]
+  // F까지 4역 남음: 160 + 40(달림) + 3 × 100(역당)
+  assert.equal(legEta(S, f, 170_000), 160_000 + 40_000 + 3 * 100_000)
+})
+
+// 09-30 퇴근 실기기 기록(0.5.3, 7호선 강남구청→하계): [역, 상태, 사건 시각, 앱이 처음 본 시각]
+const RIDE_0930: [string, number, string, string][] = [
+  ['강남구청', 1, '18:19:07', '18:20:18'],
+  ['강남구청', 2, '18:20:30', '18:20:48'],
+  ['청담', 1, '18:21:38', '18:22:22'],
+  ['청담', 2, '18:22:58', '18:23:56'],
+  ['자양', 0, '18:24:28', '18:24:44'],
+  ['자양', 1, '18:24:47', '18:25:32'],
+  ['자양', 2, '18:26:02', '18:27:07'],
+  ['건대입구', 1, '18:27:09', '18:27:42'],
+  ['건대입구', 2, '18:28:43', '18:29:18'],
+  ['어린이대공원', 0, '18:29:07', '18:29:35'],
+  ['어린이대공원', 1, '18:29:22', '18:30:22'],
+  ['어린이대공원', 2, '18:30:33', '18:31:12'],
+  ['군자', 0, '18:31:08', '18:31:44'],
+  ['군자', 1, '18:31:26', '18:32:16'],
+  ['군자', 2, '18:32:57', '18:33:35'],
+  ['중곡', 1, '18:33:52', '18:34:38'],
+  ['중곡', 2, '18:34:56', '18:35:42'],
+  ['용마산', 1, '18:35:43', '18:36:29'],
+  ['용마산', 2, '18:36:51', '18:37:17'],
+  ['사가정', 0, '18:37:21', '18:38:20'],
+  ['사가정', 1, '18:37:36', '18:38:35'],
+  ['사가정', 2, '18:38:43', '18:39:39'],
+  ['면목', 1, '18:39:26', '18:40:10'],
+  ['상봉', 0, '18:40:59', '18:41:44'],
+  ['상봉', 1, '18:41:15', '18:42:16'],
+  ['상봉', 2, '18:42:31', '18:42:47'],
+  ['중화', 0, '18:43:21', '18:43:51'],
+  ['중화', 1, '18:43:44', '18:44:22'],
+  ['중화', 2, '18:44:45', '18:45:25'],
+  ['먹골', 0, '18:45:17', '18:45:57'],
+  ['먹골', 1, '18:45:34', '18:46:13'],
+  ['태릉입구', 0, '18:46:57', '18:47:31'],
+  ['태릉입구', 1, '18:47:20', '18:48:02'],
+  ['공릉', 0, '18:49:02', '18:49:37'],
+  ['공릉', 1, '18:49:16', '18:49:54'],
+  ['공릉', 2, '18:50:21', '18:50:59'],
+  ['하계', 1, '18:51:27', '18:52:01'],
+]
+const RIDE_STOPS = ['강남구청', '청담', '자양', '건대입구', '어린이대공원', '군자', '중곡', '용마산', '사가정', '면목', '상봉', '중화', '먹골', '태릉입구', '공릉', '하계']
+test('09-30 퇴근 기록을 재생하면 이전 역을 가리키는 시간이 17% 아래이고, 앞선 표시는 없다', () => {
+  const T = (x: string) => { const [h, m, s] = x.split(':').map(Number); return ((h * 60 + m) * 60 + s) * 1000 }
+  const ev = RIDE_0930.map(([station, status, at, seenAt]) => ({ station, status, at: T(at), seenAt: T(seenAt) }))
+  // 실제 위치: 역에 닿은 때부터 떠날 때까지 그 역, 떠난 뒤 다음 역 전이면 +0.5
+  const truth = (t: number) => { let i = 0, dep = false
+    for (const e of ev) if (e.at <= t) { i = RIDE_STOPS.indexOf(e.station); dep = e.status === 2 }
+    return dep ? i + 0.5 : i }
+  const fixes: Fix[] = []
+  let k = 0, behind = 0, ahead = 0, all = 0
+  const t0 = ev[0].seenAt
+  for (let t = t0; t < ev[ev.length - 1].at; t += 1000) {
+    while (k < ev.length && ev[k].seenAt <= t) {
+      const e = ev[k++], last = fixes[fixes.length - 1]
+      if (!last || last.station !== e.station) fixes.push({ station: e.station, at: e.at, arr: e.at, seen: e.seenAt, status: e.status })
+      else { last.status = e.status; last.at = e.at }
+    }
+    fixes[fixes.length - 1].seen = t - ((t - t0) % 15_500)   // 폴링마다 같은 기록을 다시 본다
+    const d = locate(RIDE_STOPS, fixes, t)!.index, tr = truth(t)
+    all++
+    if (d < Math.floor(tr)) behind++
+    if (d > Math.ceil(tr)) ahead++
+  }
+  assert.equal(ahead, 0, '열차보다 앞선 역을 가리켰다')
+  assert.ok(behind / all < 0.17, `이전 역을 가리킨 시간 ${Math.round(behind / all * 100)}%(0.5.3은 26%)`)
 })
 
 test('대기 화면 도착 예정은 앞 역의 상태로 보정한다(09-30 출근 실측)', () => {
