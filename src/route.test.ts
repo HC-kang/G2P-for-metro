@@ -61,7 +61,7 @@ test('stopsLeft는 남은 정거장 수를 준다', () => {
   assert.equal(stopsLeft(s, 'Z'), -1)
 })
 
-import { paceMs, locate, DEFAULT_PACE_MS } from './route.ts'
+import { paceMs, locate, legEta, approachEta, DWELL_MS, DEFAULT_PACE_MS } from './route.ts'
 
 const S = ['A', 'B', 'C', 'D', 'E', 'F']
 
@@ -150,4 +150,41 @@ test('자동 탑승은 하차역까지 가는 열차만 고른다(행선지·지
   assert.equal(reaches('7호선', ['하계', '공릉', '태릉입구', '먹골'], '태릉입구'), false)   // 하차역 앞에서 끝남
   assert.equal(reaches('7호선', ['하계', '공릉', '태릉입구'], '석남'), true)
   assert.equal(reaches('7호선', ['하계', '공릉'], '모르는역'), true)             // 모르면 막지 않는다
+})
+
+// 09-30 실사용: 역에 이미 도착했는데 이전 역을 가리켰다. 피드는 '출발' 기록을 다음 역에 닿을 때까지 되풀이한다.
+test('출발 기록은 되풀이돼도 떠난 시각부터 세어 다음 역을 추정한다', () => {
+  // 앞 역 기록도 그 역의 마지막 상태(출발) 시각으로 갱신된다. A 출발 10초, B 출발 120초(역당 110초).
+  // 폴링마다 'B 출발'을 다시 본다(seen 갱신)
+  const f = [{ station: 'A', at: 10_000, seen: 10_000, status: 2 }, { station: 'B', at: 120_000, seen: 175_000, status: 2 }]
+  // 떠난 지 40초: 아직 달리는 중. B 출발을 그대로 보인다
+  assert.deepEqual(locate(S, f, 160_000), { index: 1, estimated: 0, stale: false })
+  // 떠난 지 65초(= 역당 110초 - 정차 50초 이후): C에 닿았다고 추정한다. 피드가 아직 'B 출발'이어도
+  assert.deepEqual(locate(S, f, 185_000), { index: 2, estimated: 1, stale: false })
+  // 피드가 살아 있는 동안에는 한 역까지만 앞선다(열차가 터널에 서 있을 수 있다)
+  const alive = [{ station: 'A', at: 10_000, seen: 10_000, status: 2 }, { station: 'B', at: 120_000, seen: 390_000, status: 2 }]
+  assert.equal(locate(S, alive, 400_000)!.index, 2)
+})
+
+test('도착 기록이 되풀이되면(정차 중) 밀지 않는다', () => {
+  const f = [{ station: 'A', at: 0, seen: 0, status: 0 }, { station: 'B', at: 120_000, seen: 175_000, status: 1 }]
+  assert.deepEqual(locate(S, f, 185_000), { index: 1, estimated: 0, stale: false })
+})
+
+test('하차 예정은 출발 기록이면 그 역의 정차를 뺀다', () => {
+  const arrived = [{ station: 'A', at: 0, status: 0 }, { station: 'B', at: 110_000, status: 1 }]
+  const departed = [{ station: 'A', at: 0, status: 0 }, { station: 'B', at: 110_000, status: 2 }]
+  assert.equal(legEta(S, arrived, 120_000) - legEta(S, departed, 120_000), DWELL_MS)
+})
+
+test('대기 화면 도착 예정은 앞 역의 상태로 보정한다(09-30 출근 실측)', () => {
+  const t = (h: number, m: number, s: number) => ((h * 60 + m) * 60 + s) * 1000
+  // 7131: 중계(하계 한 정거장 앞) 출발 09:20:25, 하계 도착 약 09:21:15(관측 09:21:45 - 피드 지연 약 30초)
+  const eta = approachEta(t(9, 20, 25), 2, 1, false)
+  assert.ok(Math.abs(eta - t(9, 21, 15)) <= 15_000, `출발 기준 ${(eta - t(9, 21, 15)) / 1000}초 어긋남`)
+  // 같은 열차 중계 도착 09:19:25 기준으로도 비슷해야 한다(정차 약 60초)
+  const eta1 = approachEta(t(9, 19, 25), 1, 1, false)
+  assert.ok(Math.abs(eta1 - t(9, 21, 15)) <= 25_000, `도착 기준 ${(eta1 - t(9, 21, 15)) / 1000}초 어긋남`)
+  // 출발역을 향한 전역출발(3)은 달리는 시간만 남았다
+  assert.equal(approachEta(0, 3, 0, true), 60_000)
 })

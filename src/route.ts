@@ -129,6 +129,18 @@ export const FRESH_MS = 45_000
 // 서울 피드가 실제보다 늦는 정도(09-29 실측 중앙값 21초). 마지막 확인 시각에서 이만큼 빼야 실제 시각이다.
 export const FEED_LAG_MS = 20_000
 
+// 도착해서 떠날 때까지 서 있는 시간. 역당 시간(pace)의 나머지가 달리는 시간이다.
+// 09-30 출근 실측(7호선 중계, 두 열차): 정차 약 60초, 출발→다음 역 도착 55~65초, 역당 약 115초. 한산할 때를 생각해 50초로 둔다.
+export const DWELL_MS = 50_000
+// 대기 화면: 열차가 n정거장 앞 역에서 이 상태로 관측됐을 때 출발역 도착까지. 역당 시간(도착→다음 역 도착)은 HOP_MS다.
+export const HOP_MS = 110_000
+export function approachEta(at: number, status: number, n: number, atOrigin: boolean): number {
+  // 0 진입: 곧 멈춘다(+20초). 1 도착: 역당 시간 그대로. 2 출발: 정차를 이미 마쳤다(-정차).
+  // 3 전역출발: 앞 역을 막 떠났다(+달리는 시간). 출발역의 전역출발은 달리는 시간만 남았다.
+  if (status === 3) return atOrigin ? at + (HOP_MS - DWELL_MS) : at + n * HOP_MS + (HOP_MS - DWELL_MS)
+  return at + n * HOP_MS + (status === 0 ? 20_000 : status === 2 ? -DWELL_MS : 0)
+}
+
 const lastOn = (stops: string[], fixes: Fix[]) => [...fixes].reverse().find(f => stops.includes(f.station))
 // 추정의 기준 시각. 출발(2)이면 떠난 시각부터 센다. 진입·도착이면 마지막으로 그 역에서 본 때까지는 거기 있었다.
 const anchor = (f: Fix) => (f.status === 2 ? f.at : Math.max(f.at, (f.seen ?? f.at) - FEED_LAG_MS))
@@ -142,11 +154,16 @@ export function locate(stops: string[], fixes: Fix[], now: number): Guess | null
   const seen = last.seen ?? last.at
   // 신호 끊김은 확인이 끊긴 때부터 센다. 조회는 되는데 열차가 서 있는 것을 끊김으로 부르지 않는다.
   const stale = now - seen > STALE_MS
-  if (now - seen < FRESH_MS) return { index: base, estimated: 0, stale }
-  const pushed = Math.floor(Math.max(0, now - anchor(last)) / paceMs(stops, fixes))
+  const fresh = now - seen < FRESH_MS
+  // 출발(2)은 이미 떠났다는 기록이다. 피드는 다음 역에 닿을 때까지 같은 기록을 되풀이한다.
+  // 되풀이를 '지금 여기 있다'로 믿으면 다음 역에 도착한 뒤에도 30초 남짓 이전 역을 가리켰다(09-30 실사용).
+  // 그래서 출발은 떠난 시각부터 세고, 다음 역 도착은 '역당 시간 - 정차'로 본다. 피드가 살아 있으면 한 역까지만 앞선다.
+  const departed = last.status === 2
+  if (fresh && !departed) return { index: base, estimated: 0, stale }
+  const pushed = Math.floor(Math.max(0, now - anchor(last) + (departed ? DWELL_MS : 0)) / paceMs(stops, fixes))
   // 추정은 하차역 바로 앞까지만 민다. 하차역(환승역) 도착은 관측으로만 선언한다.
   // 추정으로 도착을 선언하면 폴링이 멈추거나, 열차가 앞 역에 있는데 환승 화면이 떴다.
-  const cap = base >= stops.length - 1 ? base : stops.length - 2
+  const cap = Math.min(base >= stops.length - 1 ? base : stops.length - 2, fresh ? base + 1 : Infinity)
   const index = Math.min(base + pushed, cap)
   return { index, estimated: index - base, stale }
 }
@@ -157,7 +174,8 @@ export function legEta(stops: string[], fixes: Fix[], now: number): number {
   const last = lastOn(stops, fixes)
   const pace = paceMs(stops, fixes)
   if (!last) return now + (stops.length - 1) * pace
-  return anchor(last) + (stops.length - 1 - stops.indexOf(last.station)) * pace
+  // 출발 기록이면 그 역의 정차는 이미 끝났다
+  return anchor(last) + (stops.length - 1 - stops.indexOf(last.station)) * pace - (last.status === 2 ? DWELL_MS : 0)
 }
 
 // 같은 노선 위 두 역 사이 정거장 수. 대기 화면의 '1정거장 전'에 쓴다. 모르면 -1.

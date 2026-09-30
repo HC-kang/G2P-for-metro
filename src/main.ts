@@ -16,7 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
-import { plan, planHop, departures, locate, legEta, hops, paceMs, reaches, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
+import { plan, planHop, departures, locate, legEta, hops, paceMs, reaches, approachEta, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -552,12 +552,18 @@ let showFails = 0
 // 스피너가 가장 필요한 순간에 정지했다. 이때는 글자만 갈아끼운다. 페이지를 다시 만들면 처리 중인 전환과 부딪힌다.
 // 주행 모드의 current는 탑승 전 화면의 것이라 믿지 않는다. 주행 화면은 render가 그린다.
 // 안경을 벗으면 아무도 안 보는 매초 쓰기를 멈춘다. 조회 결과로 바뀌는 내용은 폴링이 그린다(리뷰 2라운드).
+// 단, 착용 신호를 믿을 수 있을 때만이다. 09-30 실기기는 쓰고 있는데도 처음부터 끝까지 isWearing false를 보냈다.
+// 그 탓에 초 단위 시계가 15초(폴링)마다만 바뀌었다. 이제 '착용 → 미착용'으로 바뀌는 것을 본 뒤에만 멈춘다.
 let wearing = true
+let wornSeen = false
+let wearReported = false
 // 배터리 %가 바뀐 시각을 남긴다. 1% 단위라 시작·끝 두 점만으로는 짧은 주행의 %/h 오차가 크다. 기울기로 잰다(리뷰 4라운드).
 let lastBattery: number | undefined
 bridge.onDeviceStatusChanged(st => {
-  const w = st?.isWearing !== false
+  if (st?.isWearing === true) wornSeen = true
+  const w = !wornSeen || st?.isWearing !== false
   if (w !== wearing) { wearing = w; log('wearing', w) }
+  else if (st?.isWearing === false && !wornSeen && !wearReported) { wearReported = true; log('wearing false ignored (never seen worn)') }
   const b = st?.batteryLevel
   if (typeof b === 'number' && b !== lastBattery && !st?.isCharging) { lastBattery = b; log('battery change', b, 'mode', mode, 'sec', S.clock.seconds) }
 })
@@ -1341,11 +1347,15 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         if (!last || last.station !== me.station) {
           fixes.push({ station: me.station, at: me.at, seen: now, status: me.status })
           // 열차 이동을 진단 기록에 남긴다. 이게 없으면 주행 중엔 req 줄만 보여 어디쯤인지 모른다.
-          log('fix', me.station, S.statusWord(me.status), 'left', stopsLeft(stops, me.station), 'pace', Math.round(paceMs(stops, fixes) / 1000) + 's')
+          log('fix', me.station, S.statusWord(me.status), 'at', new Date(me.at).toTimeString().slice(0, 8), 'left', stopsLeft(stops, me.station), 'pace', Math.round(paceMs(stops, fixes) / 1000) + 's')
         } else {
           // 같은 역을 다시 봤다. 서 있는 열차를 다음 역으로 밀지 않게 확인 시각을 갱신한다. 상태가 바뀌면 사건 시각도.
           last.seen = now
-          if (me.status !== last.status) { last.status = me.status; last.at = me.at }
+          // 상태가 바뀌면(진입→도착→출발) 사건 시각과 함께 남긴다. 정차·주행 시간을 실측으로 고치는 데 쓴다.
+          if (me.status !== last.status) {
+            last.status = me.status; last.at = me.at
+            log('fix', me.station, S.statusWord(me.status), 'at', new Date(me.at).toTimeString().slice(0, 8))
+          }
         }
         // 출발역을 떠났다. 이때부터 2분 동안 탭 한 번이 '못 탔으면 다음 열차'다.
         if (!departedAt && (me.station !== stops[0] || me.status === 2)) { departedAt = now; log('departed', stops[0]) }
@@ -1485,11 +1495,10 @@ async function renderNow(): Promise<void> {
     // 세 번 연속 못 찾기 전에는 오류로 단정하지 않는다. 한 번 놓친 것은 흔하다.
     if (approach || misses < 3) {
       // 열차가 어디 있는지 보이면 도착 예정을 그 위치로 다시 센다. 도착 정보(조회 시각 기준)는 금방 낡는다.
-      // '1정거장 전'인데 '약 5분'이라고 했다(리뷰 2라운드). 한 정거장 약 110초, 역에 서 있으면 30초를 더한다.
-      const n = !approach ? -1 : approachStatus === 3 && approach === stops[0] ? 1 : hops(leg().line, approach, stops[0])
-      // 전역출발(3)은 앞 역을 막 떠난 것이다. 그 역까지 약 80초를 더한다(리뷰 3라운드).
-      const extra = approachStatus === 0 || approachStatus === 1 ? 30_000 : approachStatus === 3 && approach !== stops[0] ? 80_000 : 0
-      const observed = n >= 0 && approachAt ? approachAt + n * 110_000 + extra : 0
+      // '1정거장 전'인데 '약 5분'이라고 했다(리뷰 2라운드). 상태별 보정은 route.approachEta(09-30 실측).
+      // 앞 역을 '출발'한 열차에 역당 시간을 통째로 더해 약 50초 늦게 말했다(09-30 실사용: 이미 왔는데 '1정거장 전').
+      const n = !approach ? -1 : hops(leg().line, approach, stops[0])
+      const observed = n >= 0 && approachAt ? approachEta(approachAt, approachStatus, n, approach === stops[0]) : 0
       return show(S.waiting({
         now, line: leg().line, toward: train!.dest || train!.toward,
         at: approach ? `${approach} ${S.statusWord(approachStatus)}`.trim() : '',
