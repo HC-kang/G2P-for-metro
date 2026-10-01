@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { plan, reaches, stopsLeft } from './route.ts'
+import { plan, reaches, stopsLeft, alternatives } from './route.ts'
 
 const shape = (from: string, to: string) =>
   plan(from, to)?.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' ') ?? '실패'
@@ -274,4 +274,18 @@ test('고르기 전에 이미 떠난 열차를 가려낸다(10-01 출근 실기�
   assert.equal(leftBefore(leg7, { station: '하계', status: 2, at: t('08:00:00') }, t('08:00:30')), false)
   // 고른 뒤에 떠난 열차는 당연히 그대로
   assert.equal(leftBefore(leg7, { station: '공릉', status: 0, at: t('08:05:00') }, t('08:02:00')), false)
+})
+
+test('환승역이 다른 길도 선택지로 찾는다(10-01: 사용자의 실제 경로가 없었다)', () => {
+  const alts = alternatives('하계', '홍대입구')
+  const shape = (p: { legs: { line: string; stops: string[] }[] }) => p.legs.map(l => `${l.line} ${l.stops[0]}→${l.stops[l.stops.length - 1]}`).join(' / ')
+  const all = alts.map(shape)
+  // 사용자가 실제로 탄 길
+  assert.ok(all.includes('7호선 하계→태릉입구 / 6호선 태릉입구→신당 / 2호선 신당→홍대입구'), all.slice(0, 12).join('\n'))
+  // 전에 내놓던 길도 그대로 있다
+  assert.ok(all.includes('7호선 하계→상봉 / 경의중앙선 상봉→왕십리 / 2호선 왕십리→홍대입구'))
+  // 직통이 있으면 직통도 나온다
+  assert.ok(alternatives('하계', '청담').map(shape).includes('7호선 하계→청담'))
+  // 모든 구간은 두 역 이상이고 이어져 있다
+  for (const p of alts) for (let i = 1; i < p.legs.length; i++) assert.ok(p.legs[i].stops.length > 1 && p.legs[i - 1].stops.length > 1)
 })

@@ -79,6 +79,69 @@ export function planHop(from: string, to: string, line: string, next: string): P
   return p
 }
 
+// 한 노선만 타고 from에서 닿는 모든 역과 그 사이 역 목록(너비 우선, 같은 노선 간선만). 순환선은 짧은 쪽이 나온다.
+function reachOn(line: string, from: string): Map<string, string[]> {
+  const out = new Map<string, string[]>([[from, [from]]])
+  const queue = [from]
+  while (queue.length) {
+    const cur = queue.shift()!
+    for (const e of neighbors(node(line, cur))) {
+      const st = stationAt(e.to)
+      if (e.w !== 1 || !st || st.line !== line || out.has(st.name)) continue
+      out.set(st.name, [...out.get(cur)!, st.name])
+      queue.push(st.name)
+    }
+  }
+  return out
+}
+
+// 환승 2번까지의 경로를 모두 찾는다. 선택지에 '환승역이 다른 길'을 내놓기 위해서다.
+// 방면별 최선 하나만 보였더니, 사용자가 실제로 타는 길(하계→태릉입구 6호선→신당 2호선→홍대입구)이 선택지에 없었다(10-01).
+// 같은 노선 순서·같은 환승역이면 하나로 친다. 정렬과 가지치기는 부르는 쪽이 한다.
+export function alternatives(from: string, to: string): Plan[] {
+  if (from === to) return []
+  const cache = new Map<string, Map<string, string[]>>()
+  const reach = (line: string, st: string) => {
+    const k = node(line, st)
+    if (!cache.has(k)) cache.set(k, reachOn(line, st))
+    return cache.get(k)!
+  }
+  // 그 노선 승강장에서 갈아탈 수 있는 (노선, 역). 역 이름이 다른 환승(지상 연결)도 그래프에 있으면 따른다.
+  const xfers = (line: string, st: string) => neighbors(node(line, st)).filter(e => e.w !== 1)
+    .map(e => stationAt(e.to)).filter((x): x is NonNullable<typeof x> => !!x && x.line !== line)
+  const best = new Map<string, Plan>()
+  const size = (p: Plan) => p.legs.reduce((n, l) => n + l.stops.length - 1, 0)
+  const add = (legs: Leg[]) => {
+    if (legs.some(l => l.stops.length < 2)) return
+    const p = { from, to, legs }
+    const key = legs.map(l => `${l.line}@${l.stops[0]}`).join('>')
+    const old = best.get(key)
+    if (!old || size(p) < size(old)) best.set(key, p)
+  }
+  for (const n0 of nodesOf(from)) {
+    const l1 = stationAt(n0)?.line
+    if (!l1) continue
+    const r1 = reach(l1, from)
+    if (r1.has(to)) add([{ line: l1, stops: r1.get(to)! }])
+    for (const [t1, s1] of r1) {
+      if (t1 === from || t1 === to) continue
+      for (const x2 of xfers(l1, t1)) {
+        const r2 = reach(x2.line, x2.name)
+        if (r2.has(to)) add([{ line: l1, stops: s1 }, { line: x2.line, stops: r2.get(to)! }])
+        for (const [t2, s2] of r2) {
+          if (t2 === x2.name || t2 === to || t2 === from) continue
+          for (const x3 of xfers(x2.line, t2)) {
+            if (x3.line === l1) continue   // 탔던 노선으로 되돌아가는 길은 내놓지 않는다
+            const r3 = reach(x3.line, x3.name)
+            if (r3.has(to)) add([{ line: l1, stops: s1 }, { line: x2.line, stops: s2 }, { line: x3.line, stops: r3.get(to)! }])
+          }
+        }
+      }
+    }
+  }
+  return [...best.values()]
+}
+
 // 출발역에서 갈 수 있는 모든 (노선, 방면). 화면의 선택지를 만들 때 쓴다.
 export function departures(from: string): { line: string; next: string }[] {
   const out: { line: string; next: string }[] = []

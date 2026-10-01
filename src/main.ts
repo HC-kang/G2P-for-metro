@@ -16,7 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
-import { plan, planHop, departures, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
+import { plan, planHop, departures, alternatives, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, pointsToNext, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -1038,16 +1038,26 @@ function routeOptions(dest: string): Plan[] {
   const legCap = best.legs.length + 1
   const timeCap = tripMinutes(best) + 15
   const kept = out.filter((p, i) => i === 0 || (p.legs.length <= legCap && tripMinutes(p) <= timeCap))
-  // 빠른 것부터. 정거장 수에 환승 시간을 더해 견준다.
-  kept.sort((a, b) => tripMinutes(a) - tripMinutes(b))
-  // 지난번에 고른 길이 있으면 맨 위로 올린다. 바꾸고 싶으면 아래를 고르면 된다.
+  // 환승역이 다른 길도 내놓는다. 방면별 최선만 보였더니 사용자가 실제로 타는 길이 선택지에 없었다
+  // (10-01: 하계→홍대입구에 '태릉입구 6호선 → 신당 2호선'이 없었다). 가장 빠른 길보다 10분 안쪽, 환승 2번까지.
   const liked = prefs.get(`${origin}>${dest}`)
-  if (liked) {
-    const i = kept.findIndex(p => routeKey(p) === liked)
-    if (i > 0) kept.unshift(...kept.splice(i, 1))
+  const fastest = Math.min(...kept.map(tripMinutes))
+  for (const p of alternatives(origin, dest).sort((a, b) => tripMinutes(a) - tripMinutes(b))) {
+    const k = routeKey(p)
+    if (seen.has(k)) continue
+    if (k !== liked && (tripMinutes(p) > fastest + 10 || p.legs.length > legCap)) continue
+    seen.add(k)
+    kept.push(p)
   }
-  return kept
+  // 빠른 것부터. 정거장 수에 환승 시간을 더해 견준다.
+  kept.sort((a, b) => tripMinutes(a) - tripMinutes(b) || a.legs.length - b.legs.length)
+  // 지난번에 고른 길이 있으면 맨 위로 올린다. 바꾸고 싶으면 아래를 고르면 된다.
+  const i = liked ? kept.findIndex(p => routeKey(p) === liked) : -1
+  if (i > 0) kept.unshift(...kept.splice(i, 1))
+  // 안경 목록에서 스크롤은 비싸다. 여섯 개까지만 보인다(지난번에 고른 길은 맨 위라 늘 남는다).
+  return kept.slice(0, MAX_ROUTE_OPTIONS)
 }
+const MAX_ROUTE_OPTIONS = 6
 
 async function chooseRoute(dest: string): Promise<void> {
   options = routeOptions(dest)
@@ -1065,13 +1075,19 @@ async function chooseRoute(dest: string): Promise<void> {
   rows = options.map((_, i) => String(i))
   const liked = prefs.get(`${origin}>${dest}`)
   const mark = (p: Plan) => (routeKey(p) === liked ? '★ ' : '')
-  const head = (p: Plan) => `${mark(p)}${p.legs[0].line} ${p.legs[0].stops[1]} 방면`
+  // 갈아탈 노선을 괄호로 붙인다: '태릉입구(6), 신당(2)'. 환승역만 적으면 같은 역에서 다른 노선으로 가는 두 길이 똑같이 보였다.
+  const short = (l: string) => l.replace(/호선$|철도$|선$/, '')
+  // 선택지가 여섯 개까지 늘어 행마다 글자가 빠듯하다. 첫 노선은 '7호선' 대신 '7'로 줄인다.
+  const head = (p: Plan) => `${mark(p)}${short(p.legs[0].line)} ${p.legs[0].stops[1]} 방면`
   // 어디서 갈아타는지가 선택의 핵심이다. '환승 2'만으로는 두 길을 구별할 수 없었다.
   // 경유역은 쉼표로 잇는다. 붙인 점(·)과 구분점(' · ')이 한 행에 섞이면 어지럽다(리뷰 3라운드).
-  const via = (p: Plan) => (p.legs.length > 1 ? `${p.legs.slice(1).map(l => l.stops[0]).join(', ')} 환승` : '직통')
+  const via = (p: Plan) => (p.legs.length > 1 ? p.legs.slice(1).map(l => `${l.stops[0]}(${short(l.line)})`).join(', ') : '직통')
   // '약'은 붙이지 않는다. 행마다 넘침 여부가 달라 어떤 행엔 붙고 어떤 행엔 빠지는 것이 더 어색했다.
+  // 넘치는 행만 단계를 내린다: 환승역(노선) → 환승역만 → 갈아탈 노선만 → 환승 횟수
   const items = S.tiers(
     options.map(p => `${head(p)}  ${via(p)} · ${tripMinutes(p)}분`),
+    options.map(p => `${head(p)}  ${p.legs.length > 1 ? p.legs.slice(1).map(l => l.stops[0]).join(', ') : '직통'} · ${tripMinutes(p)}분`),
+    options.map(p => `${head(p)}  ${p.legs.length > 1 ? p.legs.slice(1).map(l => short(l.line)).join('→') + ' 환승' : '직통'} · ${tripMinutes(p)}분`),
     options.map(p => `${head(p)}  환승 ${p.legs.length - 1} · ${tripMinutes(p)}분`),
     options.map(p => `${head(p)}  ${tripMinutes(p)}분`),
   )
