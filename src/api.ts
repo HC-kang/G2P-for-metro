@@ -18,6 +18,7 @@ export type Arrival = {
   trainNo: string; station: string; line: string
   etaSec: number; msg: string; toward: string; dest: string; express: boolean
   last: boolean   // 막차(lstcarAt=1). 목록에 표시한다
+  ageSec: number  // 이 기록이 만들어진 지 몇 초 됐는지(recptnDt). etaSec은 이미 이만큼 뺀 값이다
   code: number    // arvlCd: 0 진입, 1 도착, 2 출발, 3 전역출발, 4 전역진입, 5 전역도착, 99 운행 중. 2면 이미 떠났다
 }
 
@@ -94,12 +95,19 @@ export function parsePositions(body: unknown): TrainPos[] {
   }))
 }
 
-export function parseArrivals(body: unknown): Arrival[] {
-  return rows(body, 'realtimeArrivalList').map((r): Arrival => ({
+// 남은 초(barvlDt)는 '지금부터'가 아니라 기록이 만들어진 때(recptnDt)부터다. 그 기록은 평소 약 1분, 붐빌 때는 3~4분 묵어서 온다.
+// 그대로 '지금부터'로 읽어서 이미 떠난 열차를 '2분 뒤 도착'이라고 태웠다(10-01 출근: 7085·7087·6074).
+// 그래서 기록의 나이를 뺀다. 음수면 이미 왔거나 지나갔다는 뜻이다.
+export function parseArrivals(body: unknown, now = Date.now()): Arrival[] {
+  return rows(body, 'realtimeArrivalList').map((r): Arrival => {
+    const made = Date.parse(String(r.recptnDt ?? '').replace(' ', 'T'))
+    const ageSec = Number.isFinite(made) ? Math.max(0, Math.round((now - made) / 1000)) : 0
+    return {
     trainNo: String(r.btrainNo ?? ''),
     station: bare(String(r.statnNm ?? '')),
     line: lineName(String(r.subwayId ?? '')),
-    etaSec: Number(r.barvlDt ?? 0),
+    etaSec: Number(r.barvlDt ?? 0) - ageSec,
+    ageSec,
     msg: String(r.arvlMsg2 ?? ''),
     // 방면도 경로 이름으로 바꾼다. 안 바꾸면 '뚝섬유원지방면'이 다음 역 '자양'과 어긋나 방향 거르기가 풀린다.
     toward: liveName(lineName(String(r.subwayId ?? '')), towardOf(String(r.trainLineNm ?? ''))),
@@ -107,7 +115,8 @@ export function parseArrivals(body: unknown): Arrival[] {
     express: String(r.btrainSttus ?? '').includes('급행'),
     last: String(r.lstcarAt ?? '') === '1',
     code: r.arvlCd == null || r.arvlCd === '' ? -1 : Number(r.arvlCd),
-  }))
+    }
+  })
 }
 
 // 기기 로그를 모아 보낸다. 한 줄마다 fetch를 보냈더니 폴링 폭증 때 초당 수십 건이 나가

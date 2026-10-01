@@ -61,7 +61,7 @@ test('stopsLeft는 남은 정거장 수를 준다', () => {
   assert.equal(stopsLeft(s, 'Z'), -1)
 })
 
-import { paceMs, locate, legEta, approachEta, travelMs, DEFAULT_PACE_MS, type Fix } from './route.ts'
+import { paceMs, locate, legEta, approachEta, travelMs, leftBefore, DEFAULT_PACE_MS, type Fix } from './route.ts'
 
 const S = ['A', 'B', 'C', 'D', 'E', 'F']
 
@@ -255,4 +255,23 @@ test('대기 화면 도착 예정은 앞 역의 상태로 보정한다(09-30 출
   assert.ok(Math.abs(eta1 - t(9, 21, 15)) <= 25_000, `도착 기준 ${(eta1 - t(9, 21, 15)) / 1000}초 어긋남`)
   // 출발역을 향한 전역출발(3)은 달리는 시간만 남았다
   assert.equal(approachEta(0, 3, 0, true), 60_000)
+})
+
+// 10-01 출근 실기록: 묵은 도착 정보 때문에 이미 떠난 열차를 태웠다. 세 번 모두 '이미 떠남'으로 판정해야 한다.
+test('고르기 전에 이미 떠난 열차를 가려낸다(10-01 출근 실기록)', () => {
+  const t = (x: string) => new Date(`2026-10-01T${x}`).getTime()
+  const leg7 = ['하계', '공릉', '태릉입구', '먹골', '중화', '상봉']
+  const leg6 = ['태릉입구', '석계', '돌곶이', '상월곡']
+  // 7085: 08:02:18에 골랐는데 하계를 07:58:55에 떠났다
+  assert.equal(leftBefore(leg7, { station: '하계', status: 2, at: t('07:58:55') }, t('08:02:18')), true)
+  // 7087: 08:02:26에 골랐는데 08:02:14에 이미 다음 역 공릉에 도착해 있었다
+  assert.equal(leftBefore(leg7, { station: '공릉', status: 1, at: t('08:02:14') }, t('08:02:26')), true)
+  // 6074: 08:08:10에 골랐는데 08:05:59에 이미 석계에 있었다
+  assert.equal(leftBefore(leg6, { station: '석계', status: 1, at: t('08:05:59') }, t('08:08:10')), true)
+  // 09-30 퇴근 7276: 18:20:17에 골랐고 18:19:07부터 강남구청에 서 있었다. 탈 수 있는 열차다
+  assert.equal(leftBefore(['강남구청', '청담'], { station: '강남구청', status: 1, at: t('18:19:07') }, t('18:20:17')), false)
+  // 타자마자 고른 경우(떠난 지 30초): 타고 있을 수 있으니 바꾸지 않는다
+  assert.equal(leftBefore(leg7, { station: '하계', status: 2, at: t('08:00:00') }, t('08:00:30')), false)
+  // 고른 뒤에 떠난 열차는 당연히 그대로
+  assert.equal(leftBefore(leg7, { station: '공릉', status: 0, at: t('08:05:00') }, t('08:02:00')), false)
 })

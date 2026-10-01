@@ -169,3 +169,17 @@ test('도착 정보에서 이미 떠난 열차(arvlCd 2)를 가려낸다', async
   assert.equal(a[0].code, 2)
   assert.equal(a[1].code, 99)
 })
+
+// 10-01 출근: 도착 정보의 남은 초는 기록이 만들어진 때(recptnDt)부터다. 기록이 묵으면 그만큼 빼야 한다.
+test('도착 정보의 남은 시간에서 기록의 나이를 뺀다', () => {
+  const now = new Date('2026-10-01T08:02:24').getTime()
+  const row = (no: string, sec: number, made: string) => ({ subwayId: '1007', statnNm: '하계', btrainNo: no, barvlDt: String(sec),
+    trainLineNm: '석남행 - 공릉방면', arvlMsg2: '', arvlCd: '99', recptnDt: made })
+  // 7087: '3분 뒤'라는 기록이 4분 묵었다(실제로는 이미 지나갔다). 7089: 30초 전 기록
+  const [gone, next] = parseArrivals({ realtimeArrivalList: [row('7087', 180, '2026-10-01 07:58:24'), row('7089', 300, '2026-10-01 08:01:54')] }, now)
+  assert.equal(gone.ageSec, 240)
+  assert.equal(gone.etaSec, -60)    // 이미 지났다
+  assert.equal(next.etaSec, 270)
+  // 기록 시각이 없으면 그대로 둔다
+  assert.equal(parseArrivals({ realtimeArrivalList: [{ ...row('7091', 120, ''), recptnDt: undefined }] }, now)[0].etaSec, 120)
+})

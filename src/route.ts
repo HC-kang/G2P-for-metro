@@ -92,6 +92,17 @@ export function departures(from: string): { line: string; next: string }[] {
   return out
 }
 
+// 고른 열차가 고르기 전에 이미 출발역을 떠났는가. 떠났으면 사용자는 그 열차에 타고 있지 않다.
+// 10-01 출근: 도착 정보가 3~4분 묵어서 앞서 간 열차를 태웠고, 전 구간이 실제보다 앞서 나갔다.
+// obs는 탑승 뒤 그 열차를 경로 위에서 처음 본 기록. 출발역을 떠난 때를 어림한다(다음 역들에 있으면 역당 60초, 도착이면 +15초).
+// 떠난 지 60초 안이면 '타자마자 고른 것'일 수 있어 그대로 둔다(출발 뒤 2분 탭 복구가 맡는다).
+export function leftBefore(stops: string[], obs: { station: string; status: number; at: number }, pickedAt: number): boolean {
+  const i = stops.indexOf(obs.station)
+  if (i < 0 || (i === 0 && obs.status !== 2)) return false
+  const left = i === 0 ? obs.at : obs.at - i * 60_000 - (obs.status >= 1 ? 15_000 : 0)
+  return left <= pickedAt - 60_000
+}
+
 export function stopsLeft(stops: string[], current: string): number {
   const i = stops.indexOf(current)
   return i < 0 ? -1 : stops.length - 1 - i

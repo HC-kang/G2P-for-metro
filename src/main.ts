@@ -16,7 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
-import { plan, planHop, departures, locate, legEta, hops, paceMs, reaches, approachEta, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
+import { plan, planHop, departures, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, pointsToNext, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -937,7 +937,7 @@ async function repickFallback(title: string): Promise<void> {
   return showLive(() => S.notice(Date.now(), title, `${Math.max(0, Math.ceil((repickUntil - Date.now()) / 1000))}초 뒤 계속 안내`, backHint()))
 }
 // 재시도와 실패 화면의 탭. 이번 고르기의 인자를 그대로 쓴다.
-const pickAgain = () => showPick(pickArgs.autoBoard, false, pickArgs.walkSec, pickArgs.prefer)
+const pickAgain = () => showPick(pickArgs.autoBoard, false, pickArgs.walkSec, pickArgs.prefer, pickArgs.first)
 
 async function backToRide(why: string): Promise<void> {
   const r = repickFrom
@@ -1111,12 +1111,16 @@ let routeShownAt = 0
 
 // 이번 열차 고르기의 인자. 재시도와 실패 화면의 탭이 그대로 다시 쓴다. showPick(true)로 부르면 다시 고르기 중에
 // 다음 열차를 자동으로 태워 원래 추적으로 돌아갈 길이 없어졌다(리뷰 3라운드).
-let pickArgs = { autoBoard: true, walkSec: 0, prefer: 0 }
+let pickArgs = { autoBoard: true, walkSec: 0, prefer: 0, first: false }
+// 이번 구간에서 '이미 떠난 열차'로 확인된 열차번호. 다시 고르지 않는다. pickedAt은 열차를 고른(태운) 시각이다.
+const gone = new Set<string>()
+let pickedAt = 0
 async function startLeg(i: number, quiet = false, walkSec = 0): Promise<void> {
   stopTransferWatch()
   legIndex = i
   autoRepicks = 0
   emptySince = 0
+  gone.clear()
   stops = leg().stops
   train = null
   approach = ''
@@ -1130,10 +1134,11 @@ async function startLeg(i: number, quiet = false, walkSec = 0): Promise<void> {
 // quiet: 경로 요약 화면이 이미 '열차를 확인하는 중'을 보이고 있다. 그 위에 로딩을 덮지 않는다.
 // walkSec: 환승처럼 걸어가야 하면 그보다 빨리 오는 열차는 자동으로 태우지 않는다(닿을 수 없다, 리뷰 1라운드).
 // prefer: 이 시각(ms)에 가장 가까이 오는 열차를 앱이 태운다(자동 다시 고르기). 목록을 띄워 사용자에게 떠넘기지 않는다.
-async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0): Promise<void> {
+// first: 가장 먼저 오는 열차를 앱이 태운다. 고른 열차가 이미 떠난 것으로 드러났을 때 쓴다.
+async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0, first = false): Promise<void> {
   // 주행 중 다시 고르기는 사용자가 고른다. 앱이 다음 열차를 태우면 원래 추적(repickFrom)이 지워진다.
-  if (repickFrom) { autoBoard = false; prefer = 0 }
-  pickArgs = { autoBoard, walkSec, prefer }
+  if (repickFrom) { autoBoard = false; prefer = 0; first = false }
+  pickArgs = { autoBoard, walkSec, prefer, first }
   mode = 'pick'
   pickGen += 1
   const gen = pickGen
@@ -1201,6 +1206,7 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
       `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`, `탭: 지금 확인\n${backHint()}`, `${from} ${ln}`))
   }
   emptySince = 0
+  if (first) return board(candidates[0])
   if (prefer) {
     // 원래 예정과 2분 넘게 어긋나면 그 열차는 다음 열차일 가능성이 크다. 원래 열차를 계속 기다린다(리뷰 3라운드).
     const c = closest(candidates, a => picksAt + a.etaSec * 1000, prefer)
@@ -1224,8 +1230,9 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
 // 이 역을 이미 떠난 열차(arvlCd 2)와 놓친 열차(exclude)는 뺀다. 떠난 열차를 '곧 도착'으로 맨 위에 두고
 // 후보가 하나면 자동으로 태웠다(리뷰 2라운드).
 function pickCandidates(all: Arrival[], exclude?: string): Arrival[] {
+  // 기록의 나이를 빼고도 45초 넘게 지난 열차는 이미 떠났다. 이미 떠난 것으로 확인한 열차(gone)도 뺀다.
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line && a.code !== 2 && a.trainNo !== exclude
-    && reaches(leg().line, stops, a.dest))
+    && a.etaSec > -45 && !gone.has(a.trainNo) && reaches(leg().line, stops, a.dest))
   const sameWay = sameLine.filter(a => a.toward === stops[1])
   return (sameWay.length ? sameWay : sameLine).sort((a, b) => a.etaSec - b.etaSec).slice(0, 18)
 }
@@ -1311,7 +1318,7 @@ async function board(a: Arrival, keepEta = false): Promise<void> {
   // 틱이 다시 그리던 옛 화면(경로 요약 등)을 버린다. 자동 다시 고르기로 조회하는 동안 경로 요약이 되살아났다(리뷰 3라운드).
   current = null
   // 도착 예정은 도착 정보를 받은 시각부터 센다. 탭한 시각부터 세면 목록을 오래 볼수록 늦게 나왔다.
-  if (!keepEta) boardedAt = picksAt || Date.now()
+  if (!keepEta) { boardedAt = picksAt || Date.now(); pickedAt = Date.now() }
   departedAt = 0
   resume = null
   repickFrom = null
@@ -1325,7 +1332,7 @@ async function board(a: Arrival, keepEta = false): Promise<void> {
   stranded = false
   menuOpen = false
   mode = 'riding'
-  log('boarded', a.trainNo, leg().line, 'eta', a.etaSec)
+  log('boarded', a.trainNo, leg().line, 'eta', a.etaSec, 'age', a.ageSec)
   const r = ride ??= { at: Date.now(), used, writes: allWrites + writes, bytes: allBytes + writeBytes }
   void logBattery('boarded').then(b => { r.battery ??= b })
   await show(S.waiting({
@@ -1389,6 +1396,15 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         // 전역출발(3)은 경로상 한 역 앞을 떠난 것이다. 이 역에 닿은 것으로 치면 위치가 한 역 앞서간다.
         if (me.status === 3 && stops.indexOf(me.station) > 0) me = { ...me, station: stops[stops.indexOf(me.station) - 1], status: 2 }
         misses = 0
+        // 고르기 전에 이미 출발역을 떠난 열차다. 사용자는 이 열차에 없다. 가장 먼저 오는 열차로 앱이 바꾼다.
+        // 도착 정보가 묵어서(10-01 출근: 3~4분) 앞서 간 열차를 태웠고, 전 구간이 앞서 나갔다.
+        if (!fixes.length && gone.size < 4 && leftBefore(stops, me, pickedAt)) {
+          gone.add(train!.trainNo)
+          log('picked train already left', train!.trainNo, me.station, S.statusWord(me.status), 'at', new Date(me.at).toTimeString().slice(0, 8),
+            'picked', new Date(pickedAt).toTimeString().slice(0, 8))
+          stopPolling()
+          return showPick(true, true, 0, 0, true)
+        }
         approach = ''
         atStatus = me.status
         const last = fixes[fixes.length - 1]
