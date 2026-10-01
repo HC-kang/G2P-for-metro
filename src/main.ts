@@ -16,7 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
-import { plan, planHop, departures, alternatives, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
+import { plan, routeChoices, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -980,47 +980,9 @@ async function showDest(): Promise<void> {
 // 최단 경로만 내밀면 "호선을 지맘대로 고른다"는 말을 듣는다.
 const routeKey = (p: Plan) => p.legs.map(l => `${l.line}:${l.stops.length}`).join('/')
 
-function routeOptions(dest: string): Plan[] {
-  // 최선 경로를 먼저 넣는다. 방면별 탐색만 돌리면 최선이 빠지는 경우가 있다.
-  // 실측: 1637개 경로 중 10건에서 가장 빠른 길이 선택지에 없었다.
-  const best = plan(origin, dest)
-  if (!best) return []
-  const seen = new Set([routeKey(best)])
-  const out = [best]
-  // 선택지의 단위는 노선이 아니라 (노선, 방면)이다. 노선만 보면 양쪽 방향이
-  // 한 후보로 뭉개져 빠른 쪽만 남는다. 하계에는 7호선뿐이지만
-  // 중계 방면과 공릉 방면은 전혀 다른 여정이다.
-  for (const d of departures(origin)) {
-    const p = planHop(origin, dest, d.line, d.next)
-    if (!p || seen.has(routeKey(p))) continue
-    seen.add(routeKey(p))
-    out.push(p)
-  }
-  // 아무도 고르지 않을 선택지는 뺀다. 환승 3~4번짜리를 내밀면 목록이 쓸모없어진다.
-  // 실측으로 정한 경계다(쓸모없는 선택지 131건 → 46건, 최선은 하나도 잃지 않음).
-  const legCap = best.legs.length + 1
-  const timeCap = tripMinutes(best) + 15
-  const kept = out.filter((p, i) => i === 0 || (p.legs.length <= legCap && tripMinutes(p) <= timeCap))
-  // 환승역이 다른 길도 내놓는다. 방면별 최선만 보였더니 사용자가 실제로 타는 길이 선택지에 없었다
-  // (10-01: 하계→홍대입구에 '태릉입구 6호선 → 신당 2호선'이 없었다). 가장 빠른 길보다 10분 안쪽, 환승 2번까지.
-  const liked = prefs.get(`${origin}>${dest}`)
-  const fastest = Math.min(...kept.map(tripMinutes))
-  for (const p of alternatives(origin, dest).sort((a, b) => tripMinutes(a) - tripMinutes(b))) {
-    const k = routeKey(p)
-    if (seen.has(k)) continue
-    if (k !== liked && (tripMinutes(p) > fastest + 10 || p.legs.length > legCap)) continue
-    seen.add(k)
-    kept.push(p)
-  }
-  // 빠른 것부터. 정거장 수에 환승 시간을 더해 견준다.
-  kept.sort((a, b) => tripMinutes(a) - tripMinutes(b) || a.legs.length - b.legs.length)
-  // 지난번에 고른 길이 있으면 맨 위로 올린다. 바꾸고 싶으면 아래를 고르면 된다.
-  const i = liked ? kept.findIndex(p => routeKey(p) === liked) : -1
-  if (i > 0) kept.unshift(...kept.splice(i, 1))
-  // 안경 목록에서 스크롤은 비싸다. 여섯 개까지만 보인다(지난번에 고른 길은 맨 위라 늘 남는다).
-  return kept.slice(0, MAX_ROUTE_OPTIONS)
-}
-const MAX_ROUTE_OPTIONS = 6
+// 고를 길. 가장 빠른 길, 방면별 길, 환승역이 다른 길을 모아 빠른 순으로 여섯 개까지(route.routeChoices).
+const routeOptions = (dest: string): Plan[] =>
+  routeChoices(origin, dest, { key: routeKey, minutes: p => tripMinutes(p), liked: prefs.get(`${origin}>${dest}`) })
 
 async function chooseRoute(dest: string): Promise<void> {
   options = routeOptions(dest)

@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { plan, reaches, stopsLeft, alternatives } from './route.ts'
+import { plan, reaches, stopsLeft, alternatives, routeChoices, type Plan } from './route.ts'
 
 const shape = (from: string, to: string) =>
   plan(from, to)?.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' ') ?? '실패'
@@ -332,4 +332,21 @@ test('환승역이 다른 길도 선택지로 찾는다(10-01: 사용자의 실�
   assert.ok(alternatives('하계', '청담').map(shape).includes('7호선 하계→청담'))
   // 모든 구간은 두 역 이상이고 이어져 있다
   for (const p of alts) for (let i = 1; i < p.legs.length; i++) assert.ok(p.legs[i].stops.length > 1 && p.legs[i - 1].stops.length > 1)
+})
+
+test('선택지: 빠른 순 여섯 개 안에 사용자의 실제 경로가 들어가고, 지난번에 고른 길은 맨 위다', () => {
+  const key = (p: Plan) => p.legs.map(l => `${l.line}:${l.stops.length}`).join('/')
+  const minutes = (p: Plan) => p.legs.reduce((n, l) => n + l.stops.length - 1, 0) * 2 + (p.legs.length - 1) * 4
+  const shape = (p: Plan) => p.legs.map(l => `${l.line} ${l.stops[0]}→${l.stops[l.stops.length - 1]}`).join(' / ')
+  const mine = '7호선 하계→태릉입구 / 6호선 태릉입구→신당 / 2호선 신당→홍대입구'
+  const opts = routeChoices('하계', '홍대입구', { key, minutes })
+  assert.equal(opts.length, 6)
+  assert.ok(opts.map(shape).includes(mine), opts.map(shape).join('\n'))
+  assert.deepEqual(opts.map(minutes), [...opts.map(minutes)].sort((a, b) => a - b), '빠른 순')
+  // 한 번 고르면 다음부터 맨 위
+  const liked = key(opts.find(p => shape(p) === mine)!)
+  assert.equal(shape(routeChoices('하계', '홍대입구', { key, minutes, liked })[0]), mine)
+  // 직통이 있으면 환승 2번짜리 대안을 늘어놓지 않는다
+  assert.ok(routeChoices('신당', '홍대입구', { key, minutes }).every(p => p.legs.length <= 2))
+  assert.equal(routeChoices('하계', '청담', { key, minutes }).length, 1)
 })
