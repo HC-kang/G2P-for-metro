@@ -173,7 +173,12 @@ export function stopsLeft(stops: string[], current: string): number {
 
 // at: 그 역에서 마지막 사건(진입·도착·출발)이 난 시각(피드의 recptnDt). seen: 그 상태를 마지막으로 다시 확인한 시각(폴링 시각).
 // at: 그 역의 마지막 상태(진입→도착→출발)가 바뀐 사건 시각. arr: 그 역을 처음 본 사건 시각(바뀌지 않는다).
-export type Fix = { station: string; at: number; seen?: number; status?: number; arr?: number }   // epoch ms
+// first: 그 역을 처음 봤을 때의 상태(0 진입, 1 도착, 2 출발). stop: 그 역에 선(도착) 사건 시각. 달린 시간·정차 시간을 재는 데 쓴다.
+export type Fix = { station: string; at: number; seen?: number; status?: number; arr?: number; first?: number; stop?: number }   // epoch ms
+// 그 역에 선 때. 도착 기록을 봤으면 그 시각, 진입만 봤으면 곧(15초 뒤) 선 것으로 본다. 출발부터 봤으면 모른다.
+const ENTER_MS = 15_000
+const stoppedAt = (f: Fix): number | null =>
+  f.stop ?? (f.status === 1 ? f.at : f.first === 2 ? null : f.first === 0 || f.status === 0 ? (f.arr ?? f.at) + ENTER_MS : (f.arr ?? f.at))
 
 // 관측이 부족할 때 쓴다. 수도권 평균 역간 소요시간이 대략 2분이다.
 export const DEFAULT_PACE_MS = 120_000
@@ -205,11 +210,21 @@ export function travelMs(stops: string[], fixes: Fix[]): number {
   const hops: number[] = []
   for (let i = 1; i < on.length; i++) {
     const a = on[i - 1], b = on[i]
-    if (a.station !== b.station && a.status === 2) hops.push((b.arr ?? b.at) - a.at)
+    // 다음 역에 선 때까지. '출발'로 처음 본 역은 선 때를 모르니 뺀다.
+    const stop = stoppedAt(b)
+    if (a.station !== b.station && a.status === 2 && stop != null && stop > a.at) hops.push(stop - a.at)
   }
   if (!hops.length) return TRAVEL_MS
-  const med = [...hops].sort((x, y) => x - y)[Math.floor(hops.length / 2)]
-  return Math.min(120_000, Math.max(25_000, med))
+  return Math.min(120_000, Math.max(25_000, median(hops)))
+}
+const median = (xs: number[]): number => [...xs].sort((x, y) => x - y)[Math.floor(xs.length / 2)]
+
+// 역에 서 있는 시간(닿음→출발). 이 열차의 이번 주행 중앙값. 닿는 것을 못 보고 '출발'부터 본 역은 뺀다.
+// 실측: 09-30 출근 7호선 약 60초, 퇴근 61~94초, 10-01 출근 6호선 64~72초.
+export function dwellMs(stops: string[], fixes: Fix[]): number {
+  const d = fixes.filter(f => stops.includes(f.station) && f.status === 2 && stoppedAt({ ...f, status: undefined }) != null)
+    .map(f => f.at - stoppedAt({ ...f, status: undefined })!).filter(x => x > 0)
+  return d.length ? Math.min(120_000, Math.max(20_000, median(d))) : DWELL_MS
 }
 export const MIN_PACE_MS = 40_000
 export const MAX_PACE_MS = 300_000
@@ -218,8 +233,6 @@ export type Guess = { index: number; estimated: number; stale: boolean }
 
 // 이만큼 안에 다시 확인한 관측은 지금 위치로 믿고 밀지 않는다. 폴링(15초)이 한두 번 비어도 버틴다.
 export const FRESH_MS = 45_000
-// 서울 피드가 실제보다 늦는 정도(09-29 실측 중앙값 21초). 마지막 확인 시각에서 이만큼 빼야 실제 시각이다.
-export const FEED_LAG_MS = 20_000
 
 // 도착해서 떠날 때까지 서 있는 시간. 역당 시간(pace)의 나머지가 달리는 시간이다.
 // 09-30 출근 실측(7호선 중계, 두 열차): 정차 약 60초, 출발→다음 역 도착 55~65초, 역당 약 115초. 한산할 때를 생각해 50초로 둔다.
@@ -234,12 +247,31 @@ export function approachEta(at: number, status: number, n: number, atOrigin: boo
 }
 
 const lastOn = (stops: string[], fixes: Fix[]) => [...fixes].reverse().find(f => stops.includes(f.station))
-// 추정의 기준 시각. 출발(2)이면 떠난 시각부터 센다. 진입·도착이면 마지막으로 그 역에서 본 때까지는 거기 있었다.
-const anchor = (f: Fix) => (f.status === 2 ? f.at : Math.max(f.at, (f.seen ?? f.at) - FEED_LAG_MS))
 
-// 관측이 끊긴 동안에만 관측 속도로 위치를 앞으로 민다.
-// 예전에는 같은 역을 다시 봐도 사건 시각부터 밀어서, 지연으로 서 있는 열차를 다음 역으로 옮겼다(리뷰 1라운드).
-export function locate(stops: string[], fixes: Fix[], now: number): Guess | null {
+// 서울 피드는 '실시간'이지만 실제보다 늦다. 사건 시각에서 앱이 그 기록을 보기까지 09-30에는 16~59초(평균 38초),
+// 10-01 출근에는 65~98초였다. 화면이 본 기록을 그대로 '지금'으로 보이면 늘 한 역쯤 뒤처진다(실사용 지적).
+// 그래서 기록의 사건 시각을 기준으로 '지금쯤 어디일지'를 센다: 역에 선 때 + 정차 + 달리는 시간 = 다음 역.
+// 정차·달리는 시간·역당 시간은 이 열차가 이번 주행에서 낸 값이고, 지연(lagMs)은 앱이 직접 잰 값이다.
+export const LAG_MS = 40_000     // 잰 값이 없을 때의 피드 지연
+const SLACK_MS = 20_000
+// 역에 선 때, 떠날(떠난) 때, 다음 역에 닿을 때
+function timeline(stops: string[], fixes: Fix[], last: Fix) {
+  const pace = paceMs(stops, fixes), run = travelMs(stops, fixes)
+  // next는 다음 역에 '들어서는' 때다(서는 때보다 15초 앞). 늦게 넘기면 '도착했는데 이전 역'이 되고,
+  // 조금 일찍 넘기는 것은 해롭지 않다(09-30 기록: 역마다 13~20초 늦게 넘어갔다).
+  const enter = Math.max(run - ENTER_MS, 15_000)
+  if (last.status === 2) return { stopAt: last.at, dep: last.at, next: last.at + enter, pace }
+  const stopAt = stoppedAt(last) ?? last.at
+  const dep = stopAt + dwellMs(stops, fixes)
+  return { stopAt, dep, next: dep + enter, pace }
+}
+// 떠났어야 할 때가 한참 지났는데 피드에 다음 역이 안 보인다. 열차가 서 있는 것이다(지연). 앞으로 밀지 않는다.
+// 다음 역 도착 기록은 '역에 선 때 + 역당 시간 + 피드 지연' 무렵이면 보여야 한다.
+// 지연은 방금 잰 값보다 클 수 있다(10-01: 43초로 재던 중에 실제는 94초였다). 넉넉히 기다린 뒤에만 '서 있다'고 본다.
+const held = (last: Fix, t: { stopAt: number; next: number; pace: number }, now: number, lagMs: number): boolean =>
+  last.status !== 2 && now > Math.max(t.next, t.stopAt + t.pace) + Math.max(lagMs, 60_000) * 1.5 + SLACK_MS
+
+export function locate(stops: string[], fixes: Fix[], now: number, lagMs = LAG_MS): Guess | null {
   const last = lastOn(stops, fixes)
   if (!last) return null
   const base = stops.indexOf(last.station)
@@ -247,35 +279,34 @@ export function locate(stops: string[], fixes: Fix[], now: number): Guess | null
   // 신호 끊김은 확인이 끊긴 때부터 센다. 조회는 되는데 열차가 서 있는 것을 끊김으로 부르지 않는다.
   const stale = now - seen > STALE_MS
   const fresh = now - seen < FRESH_MS
-  // 출발(2)은 이미 떠났다는 기록이다. 피드는 다음 역에 닿을 때까지 같은 기록을 되풀이한다.
-  // 되풀이를 '지금 여기 있다'로 믿으면 다음 역에 도착한 뒤에도 30초 남짓 이전 역을 가리켰다(09-30 실사용).
-  // 그래서 출발은 떠난 시각부터 세고, 다음 역 도착은 '역당 시간 - 정차'로 본다. 피드가 살아 있으면 한 역까지만 앞선다.
-  // (0.5.3은 '역당 시간 - 정차'로 셌는데 역당 시간이 부풀어 거의 발동하지 않았다. 이제 이 열차의 실제 달리는 시간으로 센다.
-  //  09-30 퇴근 기록 재생: 이전 역을 가리킨 시간 26% → 15%, 앞선 표시 0.)
-  const departed = last.status === 2
-  if (fresh && !departed) return { index: base, estimated: 0, stale }
-  const pace = paceMs(stops, fixes)
-  const run = travelMs(stops, fixes)
-  const pushed = departed
-    ? (now - last.at >= run ? 1 + Math.floor((now - last.at - run) / pace) : 0)
-    : Math.floor(Math.max(0, now - anchor(last)) / pace)
+  const t = timeline(stops, fixes, last)
+  let pushed = 0
+  if (fresh) {
+    // 피드가 살아 있다. 다음 역에 닿을 때가 됐으면 한 역 앞선다(피드가 따라오기 전까지). 한 역까지만.
+    if (now >= t.next && !held(last, t, now, lagMs)) pushed = 1
+  } else {
+    // 조회가 끊겼다. 마지막으로 확인한 때까지는 떠나지 않았다고 보고(지연 감안) 시각으로 계속 민다.
+    const next = last.status === 2 ? t.next : Math.max(t.dep, seen - lagMs) + (t.next - t.dep)
+    if (now >= next) pushed = 1 + Math.floor((now - next) / t.pace)
+  }
   // 추정은 하차역 바로 앞까지만 민다. 하차역(환승역) 도착은 관측으로만 선언한다.
   // 추정으로 도착을 선언하면 폴링이 멈추거나, 열차가 앞 역에 있는데 환승 화면이 떴다.
-  const cap = Math.min(base >= stops.length - 1 ? base : stops.length - 2, fresh ? base + 1 : Infinity)
+  const cap = base >= stops.length - 1 ? base : stops.length - 2
   const index = Math.min(base + pushed, cap)
   return { index, estimated: index - base, stale }
 }
 
-// 이번 구간 끝(하차·환승역) 도착 예정 시각. 마지막 관측에 고정한다.
+// 이번 구간 끝(하차·환승역) 도착 예정 시각. 마지막 기록의 사건 시각에 고정한다.
 // 현재시각에 남은 역×속도를 더하면 추정 칸이 넘어갈 때마다 최대 한 역 간격만큼 톱니처럼 흔들렸다(리뷰 1라운드).
-export function legEta(stops: string[], fixes: Fix[], now: number): number {
+export function legEta(stops: string[], fixes: Fix[], now: number, lagMs = LAG_MS): number {
   const last = lastOn(stops, fixes)
-  const pace = paceMs(stops, fixes)
-  if (!last) return now + (stops.length - 1) * pace
+  if (!last) return now + (stops.length - 1) * paceMs(stops, fixes)
   const left = stops.length - 1 - stops.indexOf(last.station)
-  // 출발 기록이면 그 역의 정차는 끝났다. 다음 역까지는 달리는 시간, 그 뒤는 역당 시간
-  if (last.status === 2 && left > 0) return last.at + travelMs(stops, fixes) + (left - 1) * pace
-  return anchor(last) + left * pace
+  if (left <= 0) return last.arr ?? last.at
+  const t = timeline(stops, fixes, last)
+  // 서 있는 열차(지연)는 피드가 본 때까지 다음 역에 닿지 않았다. 그때부터 센다
+  const next = held(last, t, now, lagMs) ? Math.max(t.next, now - lagMs) : t.next
+  return next + (left - 1) * t.pace
 }
 
 // 같은 노선 위 두 역 사이 정거장 수. 대기 화면의 '1정거장 전'에 쓴다. 모르면 -1.

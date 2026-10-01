@@ -83,10 +83,13 @@ test('locate는 최근 관측이면 추정하지 않는다', () => {
   assert.deepEqual(locate(S, f, 100_000), { index: 1, estimated: 0, stale: false })
 })
 
-test('locate는 신호가 끊기면 관측 속도로 위치를 민다', () => {
-  const f = [{ station: 'A', at: 0 }, { station: 'B', at: 45_000 }]
-  // 100초 지났다. 45초에 한 정거장이므로 2정거장을 민다. STALE_MS 안이다.
-  assert.deepEqual(locate(S, f, 145_000), { index: 3, estimated: 2, stale: false })
+test('locate는 조회가 끊기면 사건 시각부터 정차·달리는 시간·역당 시간으로 위치를 민다', () => {
+  // A에 0초, B에 100초에 섰다(역당 100초). 그 뒤 조회가 끊겼다. 정차 50초(기본) 뒤 떠나 30초 뒤 C에 들어선다(180초)
+  const f = [{ station: 'A', at: 0, status: 1 }, { station: 'B', at: 100_000, status: 1 }]
+  assert.deepEqual(locate(S, f, 170_000), { index: 1, estimated: 0, stale: false })
+  assert.deepEqual(locate(S, f, 185_000), { index: 2, estimated: 1, stale: false })
+  // 그 뒤로는 역당 100초씩: D는 280초
+  assert.deepEqual(locate(S, f, 285_000), { index: 3, estimated: 2, stale: true })
 })
 
 test('locate는 STALE_MS를 넘으면 stale이다', () => {
@@ -111,14 +114,19 @@ test('locate는 관측이 없으면 null을 준다', () => {
   assert.equal(locate(S, [{ station: 'Z', at: 0 }], 1000), null)
 })
 
-test('정차 중인 열차를 다시 관측하면 다음 역으로 밀지 않고, 도착 예정은 늦춘다', async () => {
-  const { locate, legEta, FEED_LAG_MS } = await import('./route.ts')
-  // 90초에 B 도착, 그 뒤 3분 동안 계속 B 도착으로 보였다(지연 정차)
-  const f = [{ station: 'A', at: 0, status: 2 }, { station: 'B', at: 90_000, seen: 270_000, status: 1 }]
-  assert.deepEqual(locate(S, f, 280_000), { index: 1, estimated: 0, stale: false }, '방금 다시 봤으니 B다')
-  const etaMoving = legEta(S, [{ station: 'A', at: 0, status: 2 }, { station: 'B', at: 90_000, seen: 90_000, status: 1 }], 100_000)
-  assert.ok(legEta(S, f, 280_000) > etaMoving, '서 있었던 만큼 도착 예정이 늦어진다')
-  assert.equal(legEta(S, f, 280_000), 270_000 - FEED_LAG_MS + 4 * 90_000)
+test('피드가 늦는 만큼 앞서 세되, 한참 지나도 다음 역이 안 보이면 서 있는 열차로 본다', async () => {
+  const { locate, legEta } = await import('./route.ts')
+  // A를 0초에 떠나 B에 90초에 섰다(달린 시간 90초, 역당 90초). 피드는 계속 'B 도착'만 보인다. 지연은 40초로 잰다.
+  const at = (now: number) => [{ station: 'A', at: 0, status: 2 }, { station: 'B', at: 90_000, seen: now - 5_000, status: 1 }]
+  // 정차 50초(기본) 뒤 140초에 떠나, 달리는 90초에서 15초를 뺀 75초 뒤(215초)에 C에 들어선다. 그 전에는 B
+  assert.deepEqual(locate(S, at(200_000), 200_000, 40_000), { index: 1, estimated: 0, stale: false })
+  // 215초가 지나면 C에 닿았다고 본다. 피드에는 아직 안 보일 때다(늦으니까)
+  assert.deepEqual(locate(S, at(220_000), 220_000, 40_000), { index: 2, estimated: 1, stale: false })
+  // 다음 역 기록이 보였어야 할 때를 넉넉히(110초) 넘겨도 'B 도착'뿐이다. 열차가 서 있는 것이다. 밀지 않는다
+  assert.deepEqual(locate(S, at(340_000), 340_000, 40_000), { index: 1, estimated: 0, stale: false })
+  // 제때 가는 동안의 도착 예정은 사건 시각에 고정되고, 서 있는 동안에는 늦어진다
+  assert.equal(legEta(S, at(220_000), 220_000, 40_000), 215_000 + 3 * 90_000)
+  assert.equal(legEta(S, at(340_000), 340_000, 40_000), 300_000 + 3 * 90_000)
 })
 
 test('도착 예정은 현재시각이 흘러도 흔들리지 않는다', async () => {
@@ -158,28 +166,63 @@ test('출발 기록은 되풀이돼도 떠난 시각부터 세어, 이 열차의
   const f = [{ station: 'A', arr: 0, at: 60_000, seen: 60_000, status: 2 }, { station: 'B', arr: 100_000, at: 160_000, seen: 185_000, status: 2 }]
   assert.equal(travelMs(S, f), 40_000)
   assert.equal(paceMs(S, f), 100_000)   // 역에 닿은 시각끼리. 출발 시각을 섞으면 부풀었다
-  // 떠난 지 30초: 아직 달리는 중
-  assert.deepEqual(locate(S, f, 190_000), { index: 1, estimated: 0, stale: false })
-  // 떠난 지 45초(> 40초): C에 닿았다고 추정. 피드가 아직 'B 출발'이어도
-  assert.deepEqual(locate(S, f, 205_000), { index: 2, estimated: 1, stale: false })
+  // 떠난 지 20초: 아직 달리는 중
+  assert.deepEqual(locate(S, f, 180_000), { index: 1, estimated: 0, stale: false })
+  // 떠난 지 30초(달리는 40초에서 들어서는 15초를 뺀 25초 뒤): C에 들어섰다고 추정. 피드가 아직 'B 출발'이어도
+  assert.deepEqual(locate(S, f, 190_000), { index: 2, estimated: 1, stale: false })
   // 피드가 살아 있는 동안에는 한 역까지만 앞선다(열차가 터널에 서 있을 수 있다)
   const alive = [f[0], { ...f[1], seen: 390_000 }]
   assert.equal(locate(S, alive, 400_000)!.index, 2)
 })
 
-test('도착 기록이 되풀이되면(정차 중) 밀지 않는다', () => {
-  const f = [{ station: 'A', arr: 0, at: 60_000, status: 2 }, { station: 'B', arr: 120_000, at: 120_000, seen: 175_000, status: 1 }]
-  assert.deepEqual(locate(S, f, 185_000), { index: 1, estimated: 0, stale: false })
-})
-
 test('하차 예정은 출발 기록이면 다음 역까지 달리는 시간, 그 뒤는 역당 시간으로 센다', () => {
   const f = [{ station: 'A', arr: 0, at: 60_000, status: 2 }, { station: 'B', arr: 100_000, at: 160_000, status: 2 }]
-  // F까지 4역 남음: 160 + 40(달림) + 3 × 100(역당)
-  assert.equal(legEta(S, f, 170_000), 160_000 + 40_000 + 3 * 100_000)
+  // F까지 4역 남음: 160 + 25(다음 역에 들어서기까지) + 3 × 100(역당)
+  assert.equal(legEta(S, f, 170_000), 160_000 + 25_000 + 3 * 100_000)
 })
 
-// 09-30 퇴근 실기기 기록(0.5.3, 7호선 강남구청→하계): [역, 상태, 사건 시각, 앱이 처음 본 시각]
-const RIDE_0930: [string, number, string, string][] = [
+// 실기기 기록 재생. [역, 상태(0 진입·1 도착·2 출발), 사건 시각, 앱이 처음 본 시각]
+// 화면이 가리킨 역과 실제 위치를 1초마다 견준다. 실제 위치는 사건 시각 기준(도착 기록이 없으면 진입+15초).
+type Ev = [string, number, string, string]
+function replay(stops: string[], rows: Ev[]): { behind: number; ahead: number } {
+  const T = (x: string) => { const [h, m, s] = x.split(':').map(Number); return ((h * 60 + m) * 60 + s) * 1000 }
+  const ev = rows.map(([station, status, at, seenAt]) => ({ station, status, at: T(at), seenAt: T(seenAt) }))
+  const per = new Map<number, { stop: number; dep: number }>()
+  for (const [i, st] of stops.entries()) {
+    const es = ev.filter(e => e.station === st)
+    if (!es.length) continue
+    const a1 = es.find(e => e.status === 1), a0 = es.find(e => e.status === 0), d = es.find(e => e.status === 2)
+    const stop = a1 ? a1.at : a0 ? a0.at + 15_000 : d!.at - 60_000
+    per.set(i, { stop, dep: d ? d.at : stop + 60_000 })
+  }
+  const truth = (t: number) => { let v = -1; for (const [i, p] of per) if (t >= p.stop) v = t <= p.dep ? i : i + 0.5; return v }
+  const fixes: Fix[] = []
+  let lags: number[] = [], k = 0, behind = 0, ahead = 0, all = 0, aheadOf = ''
+  const t0 = ev[0].seenAt
+  for (let t = t0; t < ev[ev.length - 1].at; t += 1000) {
+    while (k < ev.length && ev[k].seenAt <= t) {   // main.ts poll과 같은 기록 방식
+      const e = ev[k++], last = fixes[fixes.length - 1]
+      if (last) lags = [...lags.slice(-4), e.seenAt - e.at]
+      if (!last || last.station !== e.station) fixes.push({ station: e.station, at: e.at, arr: e.at, first: e.status, stop: e.status === 1 ? e.at : undefined, seen: e.seenAt, status: e.status })
+      else { last.status = e.status; last.at = e.at; if (e.status === 1) last.stop = e.at }
+    }
+    const last = fixes[fixes.length - 1]
+    last.seen = t - ((t - t0) % 15_500)   // 폴링마다 같은 기록을 다시 본다
+    const lag = lags.length ? Math.min(180_000, Math.max(10_000, [...lags].sort((a, b) => a - b)[Math.floor(lags.length / 2)])) : 40_000
+    let g = locate(stops, fixes, t, lag)!
+    if (g.estimated > 0) aheadOf = last.station   // main.ts renderNow와 같은 규칙
+    else if (aheadOf === last.station && last.status === 2 && g.index < stops.length - 2) g = { ...g, index: g.index + 1, estimated: 1 }
+    const tr = truth(t)
+    if (tr < 0) continue
+    all++
+    if (g.index < Math.floor(tr)) behind++
+    if (g.index > Math.ceil(tr)) ahead++
+  }
+  return { behind: behind / all, ahead: ahead / all }
+}
+
+// 09-30 퇴근(0.5.3, 7호선 강남구청→하계). 피드 지연 16~59초. 0.5.4까지는 이전 역을 가리킨 시간이 9%였다.
+const RIDE_0930: Ev[] = [
   ['강남구청', 1, '18:19:07', '18:20:18'],
   ['강남구청', 2, '18:20:30', '18:20:48'],
   ['청담', 1, '18:21:38', '18:22:22'],
@@ -218,31 +261,32 @@ const RIDE_0930: [string, number, string, string][] = [
   ['공릉', 2, '18:50:21', '18:50:59'],
   ['하계', 1, '18:51:27', '18:52:01'],
 ]
-const RIDE_STOPS = ['강남구청', '청담', '자양', '건대입구', '어린이대공원', '군자', '중곡', '용마산', '사가정', '면목', '상봉', '중화', '먹골', '태릉입구', '공릉', '하계']
-test('09-30 퇴근 기록을 재생하면 이전 역을 가리키는 시간이 17% 아래이고, 앞선 표시는 없다', () => {
-  const T = (x: string) => { const [h, m, s] = x.split(':').map(Number); return ((h * 60 + m) * 60 + s) * 1000 }
-  const ev = RIDE_0930.map(([station, status, at, seenAt]) => ({ station, status, at: T(at), seenAt: T(seenAt) }))
-  // 실제 위치: 역에 닿은 때부터 떠날 때까지 그 역, 떠난 뒤 다음 역 전이면 +0.5
-  const truth = (t: number) => { let i = 0, dep = false
-    for (const e of ev) if (e.at <= t) { i = RIDE_STOPS.indexOf(e.station); dep = e.status === 2 }
-    return dep ? i + 0.5 : i }
-  const fixes: Fix[] = []
-  let k = 0, behind = 0, ahead = 0, all = 0
-  const t0 = ev[0].seenAt
-  for (let t = t0; t < ev[ev.length - 1].at; t += 1000) {
-    while (k < ev.length && ev[k].seenAt <= t) {
-      const e = ev[k++], last = fixes[fixes.length - 1]
-      if (!last || last.station !== e.station) fixes.push({ station: e.station, at: e.at, arr: e.at, seen: e.seenAt, status: e.status })
-      else { last.status = e.status; last.at = e.at }
-    }
-    fixes[fixes.length - 1].seen = t - ((t - t0) % 15_500)   // 폴링마다 같은 기록을 다시 본다
-    const d = locate(RIDE_STOPS, fixes, t)!.index, tr = truth(t)
-    all++
-    if (d < Math.floor(tr)) behind++
-    if (d > Math.ceil(tr)) ahead++
-  }
-  assert.equal(ahead, 0, '열차보다 앞선 역을 가리켰다')
-  assert.ok(behind / all < 0.17, `이전 역을 가리킨 시간 ${Math.round(behind / all * 100)}%(0.5.3은 26%)`)
+test('09-30 퇴근 기록 재생: 이전 역을 가리키는 시간 5% 아래, 앞선 표시 1% 아래', () => {
+  const r = replay(['강남구청', '청담', '자양', '건대입구', '어린이대공원', '군자', '중곡', '용마산', '사가정', '면목', '상봉', '중화', '먹골', '태릉입구', '공릉', '하계'], RIDE_0930)
+  assert.ok(r.behind < 0.05, `이전 역 표시 ${Math.round(r.behind * 100)}%`)
+  assert.ok(r.ahead < 0.01, `앞선 표시 ${Math.round(r.ahead * 100)}%`)
+})
+
+// 10-01 출근(0.5.4, 6호선 태릉입구→신당 방향 6074). 피드 지연 65~98초. 0.5.4는 이전 역을 가리킨 시간이 53%였다.
+const RIDE_1001: Ev[] = [
+  ['석계', 1, '08:05:59', '08:08:11'],
+  ['돌곶이', 1, '08:07:49', '08:08:26'],
+  ['돌곶이', 2, '08:09:01', '08:09:44'],
+  ['상월곡', 1, '08:09:43', '08:11:17'],
+  ['월곡', 1, '08:11:29', '08:13:04'],
+  ['월곡', 2, '08:12:33', '08:13:49'],
+  ['고려대', 2, '08:14:42', '08:15:20'],
+  ['안암', 1, '08:15:27', '08:16:38'],
+  ['보문', 1, '08:17:09', '08:18:25'],
+  ['창신', 1, '08:18:48', '08:19:59'],
+  ['동묘앞', 1, '08:20:38', '08:21:45'],
+  ['신당', 1, '08:22:13', '08:23:31'],
+  ['청구', 2, '08:25:12', '08:25:37'],
+]
+test('10-01 출근 기록 재생(피드가 1분 반 늦은 날): 이전 역을 가리키는 시간 3% 아래, 앞선 표시 1% 아래', () => {
+  const r = replay(['태릉입구', '석계', '돌곶이', '상월곡', '월곡', '고려대', '안암', '보문', '창신', '동묘앞', '신당', '청구', '약수'], RIDE_1001)
+  assert.ok(r.behind < 0.03, `이전 역 표시 ${Math.round(r.behind * 100)}%`)
+  assert.ok(r.ahead < 0.01, `앞선 표시 ${Math.round(r.ahead * 100)}%`)
 })
 
 test('대기 화면 도착 예정은 앞 역의 상태로 보정한다(09-30 출근 실측)', () => {

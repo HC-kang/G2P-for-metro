@@ -16,7 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
-import { plan, planHop, departures, alternatives, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
+import { plan, planHop, departures, alternatives, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -1298,6 +1298,8 @@ async function board(a: Arrival, keepEta = false): Promise<void> {
   current = null
   // 도착 예정은 도착 정보를 받은 시각부터 센다. 탭한 시각부터 세면 목록을 오래 볼수록 늦게 나왔다.
   if (!keepEta) { boardedAt = picksAt || Date.now(); pickedAt = Date.now() }
+  lags = []
+  aheadOf = ''
   departedAt = 0
   resume = null
   repickFrom = null
@@ -1334,6 +1336,14 @@ function schedulePoll(gen: number, ms: number, why: string): void {
 }
 
 // ---------- 추적 ----------
+
+// 피드 지연: 사건 시각에서 앱이 그 기록을 처음 보기까지. 최근 다섯 번의 중앙값을 쓴다.
+// 09-30에는 16~59초, 10-01 출근에는 65~98초였다. 고정값(20초)으로는 맞출 수 없다.
+let lags: number[] = []
+const noteLag = (ms: number): void => { if (ms > 0 && ms < 300_000) lags = [...lags.slice(-4), ms] }
+const feedLag = (): number => (lags.length ? Math.min(180_000, Math.max(10_000, [...lags].sort((a, b) => a - b)[Math.floor(lags.length / 2)])) : LAG_MS)
+// 한번 다음 역으로 넘긴 화면은, 같은 관측이 이어지는 동안 되돌리지 않는다. 출발 기록이 늦게 와 계산이 바뀌면 화면이 잠깐 뒤로 갔다.
+let aheadOf = ''
 
 async function poll(gen: number, why = 'timer'): Promise<void> {
   if (gen !== pollGen || mode !== 'riding') return
@@ -1390,16 +1400,21 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         const last = fixes[fixes.length - 1]
         const now = Date.now()
         if (!last || last.station !== me.station) {
-          fixes.push({ station: me.station, at: me.at, seen: now, status: me.status, arr: me.at })
+          // 새 사건을 볼 때마다 피드 지연(사건 시각 → 지금)을 잰다. 탑승 뒤 첫 관측은 묵은 기록일 수 있어 뺀다.
+          if (last) noteLag(now - me.at)
+          fixes.push({ station: me.station, at: me.at, seen: now, status: me.status, arr: me.at, first: me.status, stop: me.status === 1 ? me.at : undefined })
           // 열차 이동을 진단 기록에 남긴다. 이게 없으면 주행 중엔 req 줄만 보여 어디쯤인지 모른다.
-          log('fix', me.station, S.statusWord(me.status), 'at', new Date(me.at).toTimeString().slice(0, 8), 'left', stopsLeft(stops, me.station), 'pace', Math.round(paceMs(stops, fixes) / 1000) + 's')
+          log('fix', me.station, S.statusWord(me.status), 'at', new Date(me.at).toTimeString().slice(0, 8), 'left', stopsLeft(stops, me.station),
+            'pace', Math.round(paceMs(stops, fixes) / 1000) + 's', 'lag', Math.round(feedLag() / 1000) + 's')
         } else {
-          // 같은 역을 다시 봤다. 서 있는 열차를 다음 역으로 밀지 않게 확인 시각을 갱신한다. 상태가 바뀌면 사건 시각도.
+          // 같은 역을 다시 봤다. 확인 시각을 갱신한다. 상태가 바뀌면 사건 시각도.
           last.seen = now
           // 상태가 바뀌면(진입→도착→출발) 사건 시각과 함께 남긴다. 정차·주행 시간을 실측으로 고치는 데 쓴다.
           if (me.status !== last.status) {
+            noteLag(now - me.at)
             last.status = me.status; last.at = me.at
-            log('fix', me.station, S.statusWord(me.status), 'at', new Date(me.at).toTimeString().slice(0, 8))
+            if (me.status === 1) last.stop = me.at
+            log('fix', me.station, S.statusWord(me.status), 'at', new Date(me.at).toTimeString().slice(0, 8), 'lag', Math.round(feedLag() / 1000) + 's')
           }
         }
         // 출발역을 떠났다. 이때부터 2분 동안 탭 한 번이 '못 탔으면 다음 열차'다.
@@ -1536,7 +1551,7 @@ async function render(): Promise<void> {
 async function renderNow(): Promise<void> {
   if (!trip || !train) return   // 여정을 나가는 순간 틱이나 폴링이 그리려 들 수 있다
   const now = Date.now()
-  const guess = locate(stops, fixes, now)
+  let guess = locate(stops, fixes, now, feedLag())
 
   if (!guess) {
     // 아직 타지 않았다. 열차가 오는 중이거나, 열차를 못 찾았다.
@@ -1558,14 +1573,16 @@ async function renderNow(): Promise<void> {
     return show(S.loading(now, '열차를 찾는 중', `${train!.trainNo}번 위치가 아직 안 보입니다`, '탭: 메뉴\n더블탭: 처음으로', leg().line))
   }
 
+  const lastFix = fixes[fixes.length - 1]
+  if (guess.estimated > 0) aheadOf = lastFix.station
+  else if (aheadOf === lastFix.station && lastFix.status === 2 && guess.index < stops.length - 2) guess = { ...guess, index: guess.index + 1, estimated: 1 }
   const left = stopsLeft(stops, stops[guess.index])
   if (left <= 0) return arrive()
 
   const pace = paceMs(stops, fixes)
-  const lastFix = fixes[fixes.length - 1]
   const dest = stops[stops.length - 1]
   // 하차·환승역 도착 예정. 마지막 관측에 고정한다(현재시각으로 세면 톱니처럼 흔들렸다).
-  const legAt = legEta(stops, fixes, now)
+  const legAt = legEta(stops, fixes, now, feedLag())
 
   // 두 정거장 안이면 신호가 끊겨도 하차 화면이 먼저다. 끊김 3분이 넘으면 '신호 끊김'이 '다음 역에서 내리세요'를
   // 가렸다(리뷰 3라운드). 추정이라고 적고 마지막 관측이 몇 분 전인지 붙인다.
