@@ -1363,7 +1363,10 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
   if (!busy) {
     try {
       log('poll', why, 'gen', gen)
-      let me = (await positions(leg().line, train!.trainNo)).find(t => t.trainNo === train!.trainNo)
+      // 조회를 기다리는 사이에 사용자가 여정을 나가면 train·trip이 비워진다. 번호를 먼저 잡아 둔다
+      // (10-01: 더블탭으로 나가는 순간 'null is not an object (trainNo)'와 '(legs)' 오류가 났다).
+      const no = train!.trainNo
+      let me = (await positions(leg().line, no)).find(t => t.trainNo === no)
       if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
       lastPollFailed = false
       showFails = 0
@@ -1443,6 +1446,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
     } catch (e) {
       // 일시적 실패는 화면을 바꾸지 않는다. render가 추정으로 처리한다.
       // 'The string did not match the expected pattern'처럼 메시지만으로 출처를 모르는 오류가 있었다.
+      if (gen !== pollGen || !trip || !train) return   // 그새 여정을 나갔다. 화면도 상태도 건드리지 않는다
       const st = e instanceof Error && e.stack ? ' @ ' + e.stack.split('\n').slice(0, 3).join(' | ') : ''
       log('poll failed', e instanceof Error ? e.name : typeof e, String(e) + st)
       if (e instanceof BurstError) {
@@ -1461,6 +1465,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
       if (e instanceof ConfigError) return stopRide('config', e.message, CONFIG_NOTE)
       if (serverDown()) return stopRide('server down 10 min', '실시간 정보를 받지 못합니다', '10분 넘게 실패해 멈췄습니다')
     }
+    if (gen !== pollGen || mode !== 'riding') return   // 그새 다른 흐름이 시작됐다
     await render()
     // 모아 둔 진단 기록을 조회 직후에 보낸다. 통신을 따로 깨우지 않는다(리뷰 1라운드).
     flushLog()
@@ -1552,6 +1557,7 @@ async function render(): Promise<void> {
 }
 
 async function renderNow(): Promise<void> {
+  if (!trip || !train) return   // 여정을 나가는 순간 틱이나 폴링이 그리려 들 수 있다
   const now = Date.now()
   let guess = locate(stops, fixes, now)
 
