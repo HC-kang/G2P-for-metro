@@ -16,7 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
-import { plan, routeChoices, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
+import { plan, routeChoices, etaFromPosition, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -128,6 +128,7 @@ const listOf = (items: string[], head?: string) => ({
 // 지금 안경에 떠 있는 것이 텍스트 페이지인지. 맞으면 내용만 갈아끼운다(가벼움).
 // 목록 페이지에서 텍스트로 바뀔 때만 페이지를 다시 만든다.
 let pageIsText = false
+let showFailNoted = 0
 // 마지막으로 안경에 쓴 텍스트. 같으면 다시 쓰지 않는다. 쓰기 횟수와 바이트는 1분마다 기록한다(리뷰: 수치가 없다).
 let lastWritten = ''
 let writes = 0, writeBytes = 0, allWrites = 0, allBytes = 0
@@ -156,7 +157,11 @@ async function show(content: string): Promise<void> {
   showFails += 1
   // 실패마다 한 줄씩 남기면 383줄이 쌓인다. 멈추는 순간 한 번만 알린다.
   if (showFails <= SHOW_FAIL_STOP) log('show false', 'bytes', S.bytes(content), 'fails', showFails)
-  if (showFails === SHOW_FAIL_STOP) log('show 연속 실패, 틱 중단. 탭이나 폴링 성공에 재개')
+  if (showFails === SHOW_FAIL_STOP) {
+    log('show 연속 실패, 틱 중단. 탭이나 폴링 성공에 재개')
+    // 실패가 이어지기 시작할 때 안경 상태를 한 번 남긴다(배터리 12%에서 시작된 적이 있다). 5분에 한 번만.
+    if (Date.now() - showFailNoted > 5 * 60_000) { showFailNoted = Date.now(); void logBattery('show failing') }
+  }
   // 실패한 직후 또 재구성하면 한 틱에 두 번 때린다. 대체 화면은 한 번만 시도한다.
   if (showFails === 1) {
     await bridge.rebuildPageContainer(new RebuildPageContainer(
@@ -1119,8 +1124,16 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
       `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`, `탭: 지금 확인\n${backHint()}`, from))
   }
   if (queuedDouble || gen !== pickGen) return   // 사용자가 이미 다른 데로 갔다
+  let candidates: Arrival[]
+  try {
+    candidates = await liveCandidates(all, repickFrom?.train?.trainNo)
+  } catch (e) {
+    // 폭주 가드나 한도에 걸렸다. 위치 없이 도착 정보만으로 간다
+    log('pick positions skipped', e)
+    candidates = pickCandidates(all, repickFrom?.train?.trainNo).filter(a => a.etaSec > -45).sort((a, b) => a.etaSec - b.etaSec)
+  }
+  if (queuedDouble || gen !== pickGen) return   // 위치를 기다리는 사이에 다른 데로 갔다
   picksAt = Date.now()
-  const candidates = pickCandidates(all, repickFrom?.train?.trainNo)
   log('candidates', candidates.length, '| 다음역', stops[1], '| 온 방면', all.filter(a => a.line === ln).map(a => a.toward).join(',') || '없음',
     '| 조회이름', arrivalName(from), walkSec ? `| 걸어서 ${walkSec}초` : '')
 
@@ -1171,11 +1184,38 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
 // 이 역을 이미 떠난 열차(arvlCd 2)와 놓친 열차(exclude)는 뺀다. 떠난 열차를 '곧 도착'으로 맨 위에 두고
 // 후보가 하나면 자동으로 태웠다(리뷰 2라운드).
 function pickCandidates(all: Arrival[], exclude?: string): Arrival[] {
-  // 기록의 나이를 빼고도 45초 넘게 지난 열차는 이미 떠났다. 이미 떠난 것으로 확인한 열차(gone)도 뺀다.
+  // 이미 떠난 것으로 확인한 열차(gone)도 뺀다. 남은 시간으로 거르고 줄 세우는 일은 liveCandidates가 한다.
   const sameLine = all.filter(a => a.trainNo && a.line === leg().line && a.code !== 2 && a.trainNo !== exclude
-    && a.etaSec > -45 && !gone.has(a.trainNo) && reaches(leg().line, stops, a.dest))
+    && !gone.has(a.trainNo) && reaches(leg().line, stops, a.dest))
   const sameWay = sameLine.filter(a => a.toward === stops[1])
-  return (sameWay.length ? sameWay : sameLine).sort((a, b) => a.etaSec - b.etaSec).slice(0, 18)
+  return sameWay.length ? sameWay : sameLine
+}
+// 후보 열차의 남은 시간을 위치 피드로 다시 센다(route.etaFromPosition). 도착 API의 남은 초는 몇 분씩 틀리고
+// 공항철도·경의중앙선은 아예 없다. 위치를 못 받으면 도착 API 값(기록 나이를 뺀 값)을 그대로 쓴다.
+// 조회가 한 건 더 든다(노선 전체 위치). 목록을 띄울 때와 20초 갱신 때만 부른다.
+async function liveCandidates(all: Arrival[], exclude?: string): Promise<Arrival[]> {
+  let list = pickCandidates(all, exclude)
+  if (list.length) {
+    try {
+      const byNo = new Map((await positions(leg().line)).map(p => [p.trainNo, p]))
+      const now = Date.now()
+      let seen = 0
+      list = list.flatMap(a => {
+        const p = byNo.get(a.trainNo)
+        const eta = p ? etaFromPosition(leg().line, stops, p, now) : null
+        if (eta === 'gone') return []
+        if (eta == null) return [a]
+        seen += 1
+        return [{ ...a, etaSec: eta }]
+      })
+      log('pick positions', seen, '/', list.length)
+    } catch (e) {
+      if (e instanceof BurstError || e instanceof QuotaError) throw e
+      log('pick positions failed', e)
+    }
+  }
+  // 나이를 빼고도 45초 넘게 지난 열차는 이미 떠났다
+  return list.filter(a => a.etaSec > -45).sort((a, b) => a.etaSec - b.etaSec).slice(0, 18)
 }
 
 // 목록 항목은 도착 시각(조회 시각 기준)이다. '3분'처럼 상대 시간을 쓰면 목록을 보는 동안 줄지 않아 틀려졌다.
@@ -1227,7 +1267,8 @@ function schedulePickRefresh(gen: number, until: number): void {
     try {
       const all = await arrivals(stops[0])
       if (gen !== pickGen || mode !== 'pick' || busy) return stop()
-      const next = pickCandidates(all, repickFrom?.train?.trainNo)
+      const next = await liveCandidates(all, repickFrom?.train?.trainNo)
+      if (gen !== pickGen || mode !== 'pick' || busy) return stop()
       // 열차 번호가 바뀔 때만 다시 그린다(떠난 열차가 빠지거나 새 열차가 들어올 때). 도착 시각 기준도 그때만 바꾼다.
       if (next.length && next.map(a => a.trainNo).join(',') !== pickShown) {
         picksAt = Date.now()
@@ -1790,6 +1831,24 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
     return unsubscribe()
   }
   if (type === null) return
+  // 안경이 이 앱의 화면을 떠났다가(다른 화면, 알림, 화면 꺼짐) 돌아오는 때. 10-01 밤 25분 동안 화면 쓰기가 모두 실패했는데
+  // 까닭을 가를 기록이 없었다. 남기고, 돌아오면 바로 다시 그린다(같은 내용이어도 쓴다).
+  if (type === OsEventTypeList.FOREGROUND_EXIT_EVENT || type === OsEventTypeList.FOREGROUND_ENTER_EVENT) {
+    const back = type === OsEventTypeList.FOREGROUND_ENTER_EVENT
+    log(back ? 'glasses foreground' : 'glasses background', 'mode', mode)
+    if (back) {
+      lastWritten = ''; lastHead = ''; showFails = 0
+      if (mode === 'riding') void render()
+      else if (listHead) void tickHead(listHead())
+      else if (current) void show(current())
+    }
+    return
+  }
+  // 누르고 있기·센서 보고는 쓰지 않는다. 탭과 더블탭만 다룬다(다른 이벤트가 입력 시각을 건드리지 않게)
+  if (type !== OsEventTypeList.CLICK_EVENT && type !== OsEventTypeList.DOUBLE_CLICK_EVENT) {
+    if (type === OsEventTypeList.SCROLL_TOP_EVENT || type === OsEventTypeList.SCROLL_BOTTOM_EVENT) lastInputAt = Date.now()
+    return
+  }
   if (busy) {
     if (type === OsEventTypeList.DOUBLE_CLICK_EVENT) queuedDouble = true
     return

@@ -286,6 +286,24 @@ export function approachEta(at: number, status: number, n: number, atOrigin: boo
   return at + n * HOP_MS + (status === 0 ? 20_000 : status === 2 ? -DWELL_MS : 0)
 }
 
+// 열차 고르기: 후보 열차가 출발역에 닿기까지 남은 초를 위치 피드로 센다. 이미 떠났으면 'gone', 알 수 없으면 null.
+// 도착 API의 남은 초는 몇 분씩 틀린다(10-02 태릉입구 6098: '228초 뒤'라고 했는데 5초 전에 이미 도착해 있었다).
+// 공항철도·경의중앙선은 아예 주지 않는다. 위치 피드의 사건 시각으로 세는 편이 맞다.
+export function etaFromPosition(line: string, stops: string[], pos: { station: string; status: number; at: number }, now: number): number | 'gone' | null {
+  const i = stops.indexOf(pos.station)
+  if (i >= 1) return 'gone'                                   // 이미 다음 역들에 있다
+  if (i === 0) {
+    if (pos.status === 2) return 'gone'                       // 출발역을 떠났다
+    if (pos.status === 3) return Math.round((approachEta(pos.at, 3, 0, true) - now) / 1000)
+    // 승강장에 들어왔거나 서 있다. 2분이 넘었으면 떠났다고 본다(피드가 늦다)
+    return now - pos.at > 120_000 ? 'gone' : 0
+  }
+  const n = hops(line, pos.station, stops[0], 60)
+  if (n < 1) return null
+  // 계산상 이미 왔어야 하는 열차는 곧 도착으로 둔다(피드가 늦을 뿐이다). 정말 떠났으면 탑승 뒤 검증이 바꾼다.
+  return Math.max(-30, Math.round((approachEta(pos.at, pos.status, n, false) - now) / 1000))
+}
+
 const lastOn = (stops: string[], fixes: Fix[]) => [...fixes].reverse().find(f => stops.includes(f.station))
 
 // 서울 피드는 '실시간'이지만 실제보다 늦다. 사건 시각에서 앱이 그 기록을 보기까지 09-30에는 16~59초(평균 38초),

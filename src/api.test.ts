@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { parsePositions, parseArrivals, towardOf, ApiError } from './api.ts'
+import { parsePositions, parseArrivals, towardOf, etaFromMessage, ApiError } from './api.ts'
 
 // 2026-09-20 실측 응답
 const POS = {
@@ -182,4 +182,21 @@ test('도착 정보의 남은 시간에서 기록의 나이를 뺀다', () => {
   assert.equal(next.etaSec, 270)
   // 기록 시각이 없으면 그대로 둔다
   assert.equal(parseArrivals({ realtimeArrivalList: [{ ...row('7091', 120, ''), recptnDt: undefined }] }, now)[0].etaSec, 120)
+})
+
+// 10-02 공덕 실측 기록. 공항철도(1065)·경의중앙선(1063)은 남은 초(barvlDt)가 늘 0이다.
+test('남은 초가 없는 노선은 상태 코드와 문구로 어림하고, 후보에서 사라지지 않는다', () => {
+  const now = new Date('2026-10-02T10:57:33').getTime()
+  const row = (o: Record<string, string>) => ({ subwayId: '1065', statnNm: '공덕', barvlDt: '0', ...o })
+  const list = parseArrivals({ realtimeArrivalList: [
+    row({ btrainNo: 'A1015', trainLineNm: '인천공항2터미널행 - 홍대입구방면 (급행)', arvlCd: '3', arvlMsg2: '전역 출발', recptnDt: '2026-10-02 10:56:35' }),
+    row({ btrainNo: 'A2077', trainLineNm: '인천공항2터미널행 - 홍대입구방면', arvlCd: '99', arvlMsg2: '[3]번째 전역 (서울)', recptnDt: '2026-10-02 10:56:35' }),
+    row({ btrainNo: 'A2075', trainLineNm: '인천공항2터미널행 - 홍대입구방면', arvlCd: '1', arvlMsg2: '공덕 도착', recptnDt: '2026-10-02 10:56:12' }),
+  ] }, now)
+  assert.equal(list[0].etaSec, 60 - 58)        // 전역 출발: 약 60초, 기록이 58초 묵었다
+  assert.equal(list[1].etaSec, 330 - 58)       // 세 정거장 전
+  assert.equal(list[2].etaSec, -81)            // 81초 전에 도착: 이미 떠났을 것이다
+  assert.ok(list.filter(a => a.etaSec > -45).length === 2, '올 열차는 후보에 남는다')
+  assert.equal(etaFromMessage(99, '[11]번째 전역 (인천공항1터미널)'), 1210)
+  assert.equal(etaFromMessage(5, '전역 도착'), 110)
 })

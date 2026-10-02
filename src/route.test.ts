@@ -61,7 +61,7 @@ test('stopsLeft는 남은 정거장 수를 준다', () => {
   assert.equal(stopsLeft(s, 'Z'), -1)
 })
 
-import { paceMs, locate, legEta, approachEta, travelMs, leftBefore, DEFAULT_PACE_MS, type Fix } from './route.ts'
+import { paceMs, locate, legEta, approachEta, travelMs, leftBefore, etaFromPosition, DEFAULT_PACE_MS, type Fix } from './route.ts'
 
 const S = ['A', 'B', 'C', 'D', 'E', 'F']
 
@@ -349,4 +349,24 @@ test('선택지: 빠른 순 여섯 개 안에 사용자의 실제 경로가 들�
   // 직통이 있으면 환승 2번짜리 대안을 늘어놓지 않는다
   assert.ok(routeChoices('신당', '홍대입구', { key, minutes }).every(p => p.legs.length <= 2))
   assert.equal(routeChoices('하계', '청담', { key, minutes }).length, 1)
+})
+
+// 10-02 실기록: 도착 API는 6098을 '228초 뒤'라고 했는데, 위치 피드는 태릉입구로 접근 중(전역출발 09:05:33)이었고 09:06:13에 도착했다.
+test('후보 열차의 남은 시간은 위치 피드로 센다(10-02 태릉입구 6098)', () => {
+  const t = (x: string) => new Date(`2026-10-02T${x}`).getTime()
+  const leg6 = ['태릉입구', '석계', '돌곶이', '상월곡']
+  // 고른 시각 09:06:18. 출발역으로 접근 중(3): 떠난 지 45초, 약 15초 남았다
+  assert.equal(etaFromPosition('6호선', leg6, { station: '태릉입구', status: 3, at: t('09:05:33') }, t('09:06:18')), 15)
+  // 승강장에 서 있다: 곧
+  assert.equal(etaFromPosition('6호선', leg6, { station: '태릉입구', status: 1, at: t('09:06:13') }, t('09:06:40')), 0)
+  // 서 있은 지 2분이 넘은 기록은 떠난 것으로 본다. 출발 기록과 다음 역 기록도 떠난 것이다
+  assert.equal(etaFromPosition('6호선', leg6, { station: '태릉입구', status: 1, at: t('09:03:00') }, t('09:06:18')), 'gone')
+  assert.equal(etaFromPosition('6호선', leg6, { station: '태릉입구', status: 2, at: t('09:06:00') }, t('09:06:18')), 'gone')
+  assert.equal(etaFromPosition('6호선', leg6, { station: '석계', status: 0, at: t('09:06:00') }, t('09:06:18')), 'gone')
+  // 두 정거장 앞(봉화산)에 서 있다: 역당 110초씩
+  assert.equal(etaFromPosition('6호선', leg6, { station: '봉화산', status: 1, at: t('09:06:00') }, t('09:06:18')), 220 - 18)
+  // 공항철도 공덕→홍대입구: 서울역을 떠난 열차는 한 정거장 앞. 약 60초
+  assert.equal(etaFromPosition('공항철도', ['공덕', '홍대입구'], { station: '서울역', status: 2, at: t('09:44:00') }, t('09:44:20')), 40)
+  // 모르는 역이면 판단하지 않는다(도착 API 값을 쓴다)
+  assert.equal(etaFromPosition('6호선', leg6, { station: '없는역', status: 1, at: t('09:06:00') }, t('09:06:18')), null)
 })

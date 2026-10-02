@@ -102,11 +102,16 @@ export function parseArrivals(body: unknown, now = Date.now()): Arrival[] {
   return rows(body, 'realtimeArrivalList').map((r): Arrival => {
     const made = Date.parse(String(r.recptnDt ?? '').replace(' ', 'T'))
     const ageSec = Number.isFinite(made) ? Math.max(0, Math.round((now - made) / 1000)) : 0
+    const code = r.arvlCd == null || r.arvlCd === '' ? -1 : Number(r.arvlCd)
+    // 공항철도·경의중앙선 등은 남은 초를 주지 않는다(늘 0). '[2]번째 전역 (서울)' 같은 문구와 상태 코드뿐이다.
+    // 0을 그대로 쓰고 나이를 빼면 전부 음수가 되어 후보에서 사라졌다(10-02 공덕 공항철도: 6분 동안 후보 0대).
+    const given = Number(r.barvlDt ?? 0)
+    const base = given > 0 ? given : etaFromMessage(code, String(r.arvlMsg2 ?? ''))
     return {
     trainNo: String(r.btrainNo ?? ''),
     station: bare(String(r.statnNm ?? '')),
     line: lineName(String(r.subwayId ?? '')),
-    etaSec: Number(r.barvlDt ?? 0) - ageSec,
+    etaSec: base - ageSec,
     ageSec,
     msg: String(r.arvlMsg2 ?? ''),
     // 방면도 경로 이름으로 바꾼다. 안 바꾸면 '뚝섬유원지방면'이 다음 역 '자양'과 어긋나 방향 거르기가 풀린다.
@@ -114,9 +119,20 @@ export function parseArrivals(body: unknown, now = Date.now()): Arrival[] {
     dest: destOf(String(r.trainLineNm ?? '')),
     express: String(r.btrainSttus ?? '').includes('급행'),
     last: String(r.lstcarAt ?? '') === '1',
-    code: r.arvlCd == null || r.arvlCd === '' ? -1 : Number(r.arvlCd),
+    code,
     }
   })
+}
+// 남은 초가 없을 때 상태 코드와 문구로 어림한다. 역당 110초.
+// 0 진입, 1 도착, 2 출발(이 역), 3 전역출발, 4 전역진입, 5 전역도착, 99 운행 중('[N]번째 전역').
+export function etaFromMessage(code: number, msg: string): number {
+  if (code === 0) return 15
+  if (code === 1 || code === 2) return 0
+  if (code === 3) return 60
+  if (code === 4) return 125
+  if (code === 5) return 110
+  const n = /\[(\d+)\]번째 전역/.exec(msg)
+  return n ? Number(n[1]) * 110 : 0
 }
 
 // 기기 로그를 모아 보낸다. 한 줄마다 fetch를 보냈더니 폴링 폭증 때 초당 수십 건이 나가
