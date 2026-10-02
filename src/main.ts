@@ -16,7 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
-import { plan, routeChoices, etaFromPosition, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
+import { plan, routeChoices, continued, etaFromPosition, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -1032,6 +1032,16 @@ async function startTrip(picked: Plan): Promise<void> {
   trip = picked
   const dest = picked.to
   await rememberOrigin(origin)
+  // 주행 중에 나와 타던 구간의 역에서 같은 도착지로 다시 골랐다. 실제로 탄 길을 원래 출발역의 '지난번에 고른 길'로 배운다.
+  // 다음에는 그 길이 맨 위(★)다. 사용자가 날마다 ★를 누르고 중간에 다시 고르는 일을 없앤다.
+  if (resume?.departedAt && Date.now() - resume.at < 10 * 60_000) {
+    const actual = continued(resume.trip, resume.legIndex, origin, picked)
+    if (actual) {
+      prefs.delete(`${actual.from}>${dest}`)
+      prefs.set(`${actual.from}>${dest}`, routeKey(actual))
+      log('learned route', actual.from, '->', dest, actual.legs.map(l => `${l.line} ${l.stops[0]}→${l.stops[l.stops.length - 1]}`).join(' / '))
+    }
+  }
   // 고른 길을 기억한다. 다음에 같은 구간이면 맨 위에 둔다.
   // 지웠다가 다시 넣어 맨 뒤로 보낸다. 순서가 곧 최근 사용 순서다(목적지 정렬에 쓴다).
   prefs.delete(`${origin}>${dest}`)
@@ -1058,6 +1068,11 @@ let routeShownAt = 0
 // 이번 열차 고르기의 인자. 재시도와 실패 화면의 탭이 그대로 다시 쓴다. showPick(true)로 부르면 다시 고르기 중에
 // 다음 열차를 자동으로 태워 원래 추적으로 돌아갈 길이 없어졌다(리뷰 3라운드).
 let pickArgs = { autoBoard: true, walkSec: 0, prefer: 0, first: false }
+// 환승: 이 시각 전에 오는 열차는 걸어서 닿지 못한다. 구간을 시작할 때 정하고, 다시 조회해도 늘리지 않는다.
+let walkUntil = 0
+const walkLeft = () => Math.max(0, Math.ceil((walkUntil - Date.now()) / 1000))
+// 걸어서 닿을 수 있는 열차. 걷는 시간이 다 지났으면(이미 승강장) 오는 열차는 다 탈 수 있다.
+const reachableOf = (list: Arrival[]): Arrival[] => { const w = walkLeft(); return w === 0 ? list : list.filter(a => a.etaSec >= w) }
 // 이번 구간에서 '이미 떠난 열차'로 확인된 열차번호. 다시 고르지 않는다. pickedAt은 열차를 고른(태운) 시각이다.
 const gone = new Set<string>()
 let pickedAt = 0
@@ -1066,6 +1081,7 @@ async function startLeg(i: number, quiet = false, walkSec = 0): Promise<void> {
   legIndex = i
   autoRepicks = 0
   emptySince = 0
+  walkUntil = Date.now() + walkSec * 1000
   gone.clear()
   stops = leg().stops
   train = null
@@ -1170,7 +1186,7 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
   }
   // 환승 뒤 자동 진행: 걸어서 닿을 수 있는 첫 열차를 태운다. 닿을 열차가 없으면 목록을 보인다.
   if (autoBoard && walkSec) {
-    const reachable = candidates.filter(a => a.etaSec >= walkSec)
+    const reachable = reachableOf(candidates)
     if (reachable.length) return board(reachable[0])
   } else if (candidates.length === 1 && autoBoard) return board(candidates[0])
 
@@ -1269,6 +1285,12 @@ function schedulePickRefresh(gen: number, until: number): void {
       if (gen !== pickGen || mode !== 'pick' || busy) return stop()
       const next = await liveCandidates(all, repickFrom?.train?.trainNo)
       if (gen !== pickGen || mode !== 'pick' || busy) return stop()
+      // 환승 자동 진행인데 아까는 닿을 열차가 없어 목록을 띄웠다. 닿을 수 있는 열차가 생기면 앱이 태운다.
+      // 걷는 시간이 다 지났으면 가장 먼저 오는 열차다. 사용자가 목록에서 직접 고르기를 기다리지 않는다(10-02 재현에서 발견).
+      if (pickArgs.autoBoard && pickArgs.walkSec && !repickFrom) {
+        const reachable = reachableOf(next)
+        if (reachable.length) { picksAt = Date.now(); log('transfer auto board', reachable[0].trainNo); stop(); return board(reachable[0]) }
+      }
       // 열차 번호가 바뀔 때만 다시 그린다(떠난 열차가 빠지거나 새 열차가 들어올 때). 도착 시각 기준도 그때만 바꾼다.
       if (next.length && next.map(a => a.trainNo).join(',') !== pickShown) {
         picksAt = Date.now()

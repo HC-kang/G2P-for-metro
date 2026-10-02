@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { plan, reaches, stopsLeft, alternatives, routeChoices, type Plan } from './route.ts'
+import { plan, reaches, stopsLeft, alternatives, routeChoices, continued, type Plan } from './route.ts'
 
 const shape = (from: string, to: string) =>
   plan(from, to)?.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' ') ?? '실패'
@@ -349,6 +349,10 @@ test('선택지: 빠른 순 여섯 개 안에 사용자의 실제 경로가 들�
   // 직통이 있으면 환승 2번짜리 대안을 늘어놓지 않는다
   assert.ok(routeChoices('신당', '홍대입구', { key, minutes }).every(p => p.legs.length <= 2))
   assert.equal(routeChoices('하계', '청담', { key, minutes }).length, 1)
+  // 2분짜리 직통(공덕→홍대입구)에 10분 넘는 우회를 붙이지 않는다. 다른 노선 직통(경의중앙 4분)은 남는다
+  const short = routeChoices('공덕', '홍대입구', { key, minutes })
+  assert.ok(short.every(p => minutes(p) <= 8), short.map(p => `${shape(p)} ${minutes(p)}분`).join('\n'))
+  assert.ok(short.some(p => p.legs[0].line === '경의중앙선'))
 })
 
 // 10-02 실기록: 도착 API는 6098을 '228초 뒤'라고 했는데, 위치 피드는 태릉입구로 접근 중(전역출발 09:05:33)이었고 09:06:13에 도착했다.
@@ -369,4 +373,21 @@ test('후보 열차의 남은 시간은 위치 피드로 센다(10-02 태릉입�
   assert.equal(etaFromPosition('공항철도', ['공덕', '홍대입구'], { station: '서울역', status: 2, at: t('09:44:00') }, t('09:44:20')), 40)
   // 모르는 역이면 판단하지 않는다(도착 API 값을 쓴다)
   assert.equal(etaFromPosition('6호선', leg6, { station: '없는역', status: 1, at: t('09:06:00') }, t('09:06:18')), null)
+})
+
+// 10-02 실기록: ★(하계→상봉→왕십리→홍대입구)로 타다가 태릉입구에서 나와 '6호선 → 공덕 → 공항철도'로 다시 골랐다.
+test('주행 중에 다시 고르면 실제로 탄 길을 잇고, 그 길이 다음 선택지의 맨 위가 된다', () => {
+  const key = (p: Plan) => p.legs.map(l => `${l.line}:${l.stops.length}`).join('/')
+  const minutes = (p: Plan) => p.legs.reduce((n, l) => n + l.stops.length - 1, 0) * 2 + (p.legs.length - 1) * 4
+  const shape = (p: Plan) => p.legs.map(l => `${l.line} ${l.stops[0]}→${l.stops[l.stops.length - 1]}`).join(' / ')
+  const old = routeChoices('하계', '홍대입구', { key, minutes }).find(p => shape(p).includes('상봉'))!
+  const next = routeChoices('태릉입구', '홍대입구', { key, minutes }).find(p => shape(p) === '6호선 태릉입구→공덕 / 공항철도 공덕→홍대입구')!
+  const actual = continued(old, 0, '태릉입구', next)!
+  assert.equal(shape(actual), '7호선 하계→태릉입구 / 6호선 태릉입구→공덕 / 공항철도 공덕→홍대입구')
+  assert.equal(shape(routeChoices('하계', '홍대입구', { key, minutes, liked: key(actual) })[0]), shape(actual))
+  // 같은 노선으로 계속 가면 한 구간으로 합친다. 도착지가 다르거나 타던 구간 밖의 역이면 잇지 않는다
+  const direct = plan('하계', '청담')!
+  assert.equal(continued(direct, 0, '건대입구', plan('건대입구', '청담')!)!.legs.length, 1)
+  assert.equal(continued(old, 0, '노원', plan('노원', '홍대입구')!), null)
+  assert.equal(continued(old, 0, '태릉입구', plan('태릉입구', '청담')!), null)
 })

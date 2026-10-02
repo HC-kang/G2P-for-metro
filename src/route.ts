@@ -124,12 +124,12 @@ export function alternatives(from: string, to: string): Plan[] {
     const r1 = reach(l1, from)
     if (r1.has(to)) add([{ line: l1, stops: r1.get(to)! }])
     for (const [t1, s1] of r1) {
-      if (t1 === from || t1 === to) continue
+      if (t1 === from || s1.includes(to)) continue   // 도착지를 지나쳐 갈아타는 길은 내놓지 않는다
       for (const x2 of xfers(l1, t1)) {
         const r2 = reach(x2.line, x2.name)
         if (r2.has(to)) add([{ line: l1, stops: s1 }, { line: x2.line, stops: r2.get(to)! }])
         for (const [t2, s2] of r2) {
-          if (t2 === x2.name || t2 === to || t2 === from) continue
+          if (t2 === x2.name || t2 === from || s2.includes(to)) continue
           for (const x3 of xfers(x2.line, t2)) {
             if (x3.line === l1) continue   // 탔던 노선으로 되돌아가는 길은 내놓지 않는다
             const r3 = reach(x3.line, x3.name)
@@ -140,6 +140,22 @@ export function alternatives(from: string, to: string): Plan[] {
     }
   }
   return [...best.values()]
+}
+
+// 주행 중에 여정을 나와, 타던 구간 위의 역(at)에서 같은 도착지로 다시 고른 경우에 실제로 탄 길.
+// 옛 여정의 지나온 부분에 새 여정을 잇는다. 이을 수 없으면 null.
+// 10-01·10-02: 사용자는 ★(상봉·왕십리)를 고르고 태릉입구에서 나와 6호선으로 다시 골랐다. ★가 실제로 타는 길이 아니었다.
+export function continued(old: Plan, legIndex: number, at: string, next: Plan): Plan | null {
+  const cur = old.legs[legIndex]
+  const cut = cur ? cur.stops.indexOf(at) : -1
+  if (cut < 1 || old.to !== next.to || next.from !== at) return null
+  const part = { line: cur.line, stops: cur.stops.slice(0, cut + 1) }
+  const head = old.legs.slice(0, legIndex)
+  // 같은 노선으로 계속 가면 한 구간으로 합친다
+  const legs = next.legs[0].line === part.line
+    ? [...head, { line: part.line, stops: [...part.stops, ...next.legs[0].stops.slice(1)] }, ...next.legs.slice(1)]
+    : [...head, part, ...next.legs]
+  return { from: old.from, to: old.to, legs }
 }
 
 // 화면에 내놓을 길. 가장 빠른 길(다익스트라), 방면별 가장 빠른 길, 환승역이 다른 길을 모은다.
@@ -162,14 +178,17 @@ export function routeChoices(from: string, to: string, o: { key: (p: Plan) => st
   // 아무도 고르지 않을 선택지는 뺀다. 환승 3~4번짜리를 내밀면 목록이 쓸모없어진다.
   // 실측으로 정한 경계다(쓸모없는 선택지 131건 → 46건, 최선은 하나도 잃지 않음).
   const legCap = best.legs.length + 1
-  const kept = out.filter((p, i) => i === 0 || (p.legs.length <= legCap && o.minutes(p) <= o.minutes(best) + 15))
+  // 짧은 구간에서는 '15분 더'가 너무 후하다. 2분짜리 직통에 14·16분짜리 우회가 붙었다(10-02 공덕→홍대입구).
+  // 가장 빠른 길의 1.5배(적어도 6분 더)까지, 그래도 15분은 넘지 않게.
+  const cap = (base: number, most: number) => Math.min(base + most, Math.max(base * 1.5, base + 6))
+  const kept = out.filter((p, i) => i === 0 || (p.legs.length <= legCap && o.minutes(p) <= cap(o.minutes(best), 15)))
   // 환승역이 다른 길도 내놓는다. 방면별 최선만 보였더니 사용자가 실제로 타는 길이 선택지에 없었다
   // (10-01: 하계→홍대입구에 '태릉입구 6호선 → 신당 2호선'이 없었다). 가장 빠른 길보다 10분 안쪽까지.
   const fastest = Math.min(...kept.map(p => o.minutes(p)))
   for (const p of alternatives(from, to).sort((a, b) => o.minutes(a) - o.minutes(b))) {
     const k = o.key(p)
     if (seen.has(k)) continue
-    if (k !== o.liked && (o.minutes(p) > fastest + 10 || p.legs.length > legCap)) continue
+    if (k !== o.liked && (o.minutes(p) > cap(fastest, 10) || p.legs.length > legCap)) continue
     seen.add(k)
     kept.push(p)
   }
