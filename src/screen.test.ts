@@ -288,6 +288,9 @@ test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', asyn
     ok(S.arrived(T, n), `arrived ${n}`)
     ok(S.transfer({ now: T, station: n, from: line, to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n, note: '반대 방향' }), `transfer ${n}`)
     ok(S.transfer({ now: T, station: n, from: '9호선', to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n }), `transfer 반대 ${n}`)
+    // 빠른환승 칸-문을 붙여도 한도·들여쓰기·한 어절 줄 규칙을 지킨다
+    ok(S.transfer({ now: T, station: n, from: line, to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n, on: '10-4', note: '반대 방향' }), `transfer 빠른환승 ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, fast: '10-4', refresh: R, estimated: true }), `alight 빠른환승 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R }), `alight 환승 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R, estimated: true, seenMin: 12 }), `alight 끊김 환승 ${n}`)
     // 추정·환승·긴 역 이름을 함께: 역 이름 묶음('…환승')과 설명 사이 빈 줄이 남아야 한다(리뷰 4라운드)
@@ -385,4 +388,13 @@ test('앱의 모든 안내 문구가 긴 역 이름에서도 한 어절 줄을 �
     n++
   }
   assert.ok(n >= 15, `문구 ${n}개만 찾았다`)
+})
+
+test('빠른환승: 하차 화면은 환승 노선 옆에, 환승 화면은 방면 옆에 칸-문을 보인다', () => {
+  const off = S.alight({ now: T, stopsLeft: 2, dest: '태릉입구', next: '먹골', arriveAt: T + 240_000, then: '6호선', fast: '1-1', refresh: R })
+  assert.ok(off.includes('6호선으로 환승') && off.includes('빠른환승 1-1'), off)
+  const on = S.transfer({ now: T, station: '태릉입구', from: '7호선', to: '6호선', toward: '석계', rest: 19, finalAt: T + 2_400_000, finalDest: '공덕', on: '1-1' })
+  assert.ok(on.includes('6호선 석계 방면') && on.includes('1-1 승차'), on)
+  // 자료가 없으면 예전 그대로
+  assert.ok(!S.alight({ now: T, stopsLeft: 2, dest: '논현', next: '학동', arriveAt: T + 240_000, then: '신분당선', refresh: R }).includes('빠른환승'))
 })

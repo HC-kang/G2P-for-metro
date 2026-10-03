@@ -297,6 +297,7 @@ export function alight(a: {
   now: number; stopsLeft: number; dest: string; next: string; arriveAt: number
   note?: string; then?: string; estimated?: boolean; refresh: Refresh; hint?: string
   seenMin?: number   // 신호가 끊겼다. 마지막 관측이 몇 분 전인지
+  fast?: string      // 빠른환승: 갈아탈 때 가장 가까운 칸-문('1-1')
 }): string {
   const verb = a.then ? '갈아타세요' : '내리세요'
   const title = a.stopsLeft <= 1 ? `다음 역에서 ${verb}` : `두 정거장 뒤 ${verb}`
@@ -312,8 +313,10 @@ export function alight(a: {
     : a.stopsLeft <= 1 ? [`${PAD}${at} 도착 예정`]
     : joinOrSplit(`${at} 도착`, `다음 ${a.next}`)
   // 강조 블록: 역 이름과 그에 붙는 한 줄은 IN. 나머지 설명은 PAD. 하차·환승·도착 화면 공통.
+  // 빠른환승 칸-문은 환승 노선 줄에 붙인다. 넘치면 그 아래 줄(같은 들여쓰기).
+  const then = !a.then ? [] : a.fast ? joinOrSplit(`${ro(a.then)} 환승`, `빠른환승 ${a.fast}`, IN) : [`${IN}${ro(a.then)} 환승`]
   return page([head(a.now, a.note ?? (a.then ? '환승' : '하차')), '', `${PAD}${title}`, '',
-    `${IN}${hero(a.dest, 6)}`, a.then ? `${IN}${ro(a.then)} 환승` : null, '', ...detail],
+    `${IN}${hero(a.dest, 6)}`, ...then, '', ...detail],
   [`${PAD}${refreshLine(a.refresh)}`, `${PAD}${a.hint ?? '탭: 메뉴'}`])
 }
 
@@ -324,11 +327,13 @@ export function arrived(now: number, dest: string): string {
 }
 
 // finalAt: 최종 도착 예정. 환승역에 닿은 때 한 번 정해 고정한다(현재시각으로 세면 매분 밀렸다). 탈 열차가 정해지기 전이라 '약'.
-export function transfer(a: { now: number; station: string; from: string; to: string; toward: string; rest: number; finalAt: number; finalDest: string; note?: string }): string {
+// on: 빠른환승으로 탈 칸-문('8-4'). 승강장 바닥 번호와 같은 표기다.
+export function transfer(a: { now: number; station: string; from: string; to: string; toward: string; rest: number; finalAt: number; finalDest: string; note?: string; on?: string }): string {
   // 같은 노선으로 되돌아가는 경우 '7호선 → 7호선'은 뜻이 없다. 반대 방향임을 말한다.
   // 승강장 표지와 같은 말. '승강장으로'까지 붙이면 6칸 들여쓰기에서 넘쳐 접혔다.
-  const go = a.from === a.to ? joinOrSplit(`${a.to} 반대 방향`, `${a.toward} 방면`, IN) : [`${IN}${a.to} ${a.toward} 방면`]
-  return page([
+  const way = a.from === a.to ? joinOrSplit(`${a.to} 반대 방향`, `${a.toward} 방면`, IN) : [`${IN}${a.to} ${a.toward} 방면`]
+  // 빠른환승 자료는 다른 노선 사이에만 있다. 같은 노선 되돌아가기에는 붙이지 않는다(줄이 넘친다).
+  const build = (go: string[]) => page([
     head(a.now, a.note ?? '환승'), '', `${PAD}여기서 갈아타세요`, '', `${IN}${hero(a.station, 6)}`, ...go, '',
     // 최종 목적지 이름이 있어야 이 환승이 어디로 가는 길인지 안다.
     ...joinOrSplit(`${a.finalDest} 약 ${hhmm(a.finalAt)} 도착`, `${a.rest}정거장`),
@@ -337,6 +342,13 @@ export function transfer(a: { now: number; station: string; from: string; to: st
     `${PAD}다음 열차를 찾는 중  ${spin(a.now)}`,
     `${PAD}탭: 지금 찾기`,
   ])
+  if (!a.on || a.from === a.to) return build(way)
+  // 이름이 길어 이미 줄이 꽉 차면 칸-문 줄을 뺀다(버린 시도의 줄바꿈은 세지 않는다)
+  const widows = layStats.widows
+  const withOn = build(joinOrSplit(way[0].trim(), `${a.on} 승차`, IN))
+  if (withOn.split('\n').length <= MAX_LINES) return withOn
+  layStats.widows = widows
+  return build(way)
 }
 
 // 고른 열차가 아직 승강장에 오지 않았다. 기다리는 동안 실제 위치를 보여준다.

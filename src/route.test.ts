@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { plan, reaches, stopsLeft, alternatives, routeChoices, continued, type Plan } from './route.ts'
+import { plan, reaches, stopsLeft, alternatives, routeChoices, continued, fastTransfer, type Plan } from './route.ts'
 
 const shape = (from: string, to: string) =>
   plan(from, to)?.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' ') ?? '실패'
@@ -61,7 +61,7 @@ test('stopsLeft는 남은 정거장 수를 준다', () => {
   assert.equal(stopsLeft(s, 'Z'), -1)
 })
 
-import { paceMs, locate, legEta, approachEta, travelMs, leftBefore, etaFromPosition, DEFAULT_PACE_MS, type Fix } from './route.ts'
+import { paceMs, locate, legEta, approachEta, travelMs, leftBefore, etaFromPosition, approaching, DEFAULT_PACE_MS, type Fix } from './route.ts'
 
 const S = ['A', 'B', 'C', 'D', 'E', 'F']
 
@@ -390,4 +390,32 @@ test('주행 중에 다시 고르면 실제로 탄 길을 잇고, 그 길이 다
   assert.equal(continued(direct, 0, '건대입구', plan('건대입구', '청담')!)!.legs.length, 1)
   assert.equal(continued(old, 0, '노원', plan('노원', '홍대입구')!), null)
   assert.equal(continued(old, 0, '태릉입구', plan('태릉입구', '청담')!), null)
+})
+
+test('빠른환승: 환승역에서 내릴 칸-문, 갈아탈 칸-문, 걷는 시간(서울교통공사 환승정보)', () => {
+  // 하계→태릉입구(7호선, 공릉에서 와서 먹골 쪽으로 가는 열차) → 6호선 석계 방면
+  assert.deepEqual(fastTransfer('태릉입구', '7호선', '공릉', '6호선', '석계'), { off: '1-1', on: '1-1', walkSec: 173 })
+  // 반대로 6호선 석계에서 와서(화랑대 쪽으로 가는 열차) 7호선 공릉 방면
+  assert.deepEqual(fastTransfer('태릉입구', '6호선', '석계', '7호선', '공릉'), { off: '1-1', on: '8-4', walkSec: 173 })
+  // 신당 2호선(동대문역사문화공원에서 와서 상왕십리 쪽) → 6호선 동묘앞 방면, 4분 1초
+  assert.deepEqual(fastTransfer('신당', '2호선', '동대문역사문화공원', '6호선', '동묘앞'), { off: '10-4', on: '8-4', walkSec: 241 })
+  // 자료에 없는 환승역(논현 7호선→신분당선)은 모른다
+  assert.equal(fastTransfer('논현', '7호선', '학동', '신분당선', '신논현'), null)
+  // 공항철도 환승의 일괄값 '10:00'은 버렸다
+  assert.equal(fastTransfer('공덕', '6호선', '효창공원앞', '공항철도', '홍대입구')?.walkSec ?? null, null)
+})
+
+// 10-03 실기록: 논현에서 신분당선(신논현 방면)을 기다리는데 도착 정보에는 이미 떠난 열차 하나뿐이었다. 다음 열차는 신사(종점)에 있었다.
+test('위치 피드에서 출발역으로 다가오며 같은 방향으로 가는 열차를 찾는다', () => {
+  const sbd = ['논현', '신논현', '강남', '양재']
+  assert.equal(approaching('신분당선', sbd, { station: '신사', terminal: '광교' }), 1)        // 다음 열차
+  assert.equal(approaching('신분당선', sbd, { station: '청계산입구', terminal: '신사' }), -1)  // 반대 방향
+  assert.equal(approaching('신분당선', sbd, { station: '신논현', terminal: '광교' }), -1)      // 이미 지나갔다
+  const l7 = ['하계', '공릉', '태릉입구']
+  assert.equal(approaching('7호선', l7, { station: '중계', terminal: '석남' }), 1)
+  assert.equal(approaching('7호선', l7, { station: '중계', terminal: '장암' }), -1)          // 하계 쪽으로 오지 않는다
+  assert.equal(approaching('7호선', l7, { station: '하계', terminal: '석남' }), -1)          // 이미 승강장(도착 정보가 맡는다)
+  assert.equal(approaching('7호선', l7, { station: '수락산', terminal: '석남' }), 4)
+  assert.equal(approaching('7호선', l7, { station: '도봉산', terminal: '석남' }, 3), -1)     // 너무 멀다
+  assert.equal(approaching('2호선', ['홍대입구', '신촌'], { station: '합정', terminal: '성수' }), -1)   // 순환선은 쓰지 않는다
 })

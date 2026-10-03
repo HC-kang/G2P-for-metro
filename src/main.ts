@@ -16,7 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
-import { plan, routeChoices, continued, etaFromPosition, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
+import { plan, routeChoices, continued, etaFromPosition, approaching, fastTransfer, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -611,7 +611,13 @@ let heardAt = 0   // 고른 열차를 피드에서 마지막으로 본(또는 �
 // 환승 1회에 걸리는 시간. 실측 전 추정값이다. 화면에는 '약'을 붙여 보여준다.
 const TRANSFER_MIN = 4
 // 환승 통로를 걸어 다음 승강장에 닿는 시간. 이보다 빨리 오는 열차는 자동으로 태우지 않는다.
-const TRANSFER_WALK_SEC = 150
+const TRANSFER_WALK_SEC = 150   // 환승정보(OA-22521)에 걷는 시간이 없을 때
+// 지금 환승역의 빠른환승 정보(내릴 칸-문, 탈 칸-문, 걷는 시간). 이 구간이 환승으로 끝날 때만.
+const xferHere = () => {
+  const next = trip?.legs[legIndex + 1]
+  return next && stops.length > 1 ? fastTransfer(stops[stops.length - 1], leg().line, stops[stops.length - 2], next.line, next.stops[1] ?? '') : null
+}
+let xferArrivedAt = 0, xferWalkSec = TRANSFER_WALK_SEC
 // 환승 화면에서 '지금 다음 열차 찾기'를 누르면 이미 승강장 가까이 왔다고 본다.
 const TRANSFER_TAP_WALK_SEC = 120   // 60초였다. 내리자마자 누르면 닿지 못할 열차를 태웠다(리뷰 2라운드)
 const tripStops = (p: Plan) => p.legs.reduce((n, l) => n + l.stops.length - 1, 0)
@@ -1076,12 +1082,13 @@ const reachableOf = (list: Arrival[]): Arrival[] => { const w = walkLeft(); retu
 // 이번 구간에서 '이미 떠난 열차'로 확인된 열차번호. 다시 고르지 않는다. pickedAt은 열차를 고른(태운) 시각이다.
 const gone = new Set<string>()
 let pickedAt = 0
-async function startLeg(i: number, quiet = false, walkSec = 0): Promise<void> {
+// walkFrom: 걷기 시작한 때(환승역에 선 때). 없으면 지금.
+async function startLeg(i: number, quiet = false, walkSec = 0, walkFrom = 0): Promise<void> {
   stopTransferWatch()
   legIndex = i
   autoRepicks = 0
   emptySince = 0
-  walkUntil = Date.now() + walkSec * 1000
+  walkUntil = (walkFrom || Date.now()) + walkSec * 1000
   gone.clear()
   stops = leg().stops
   train = null
@@ -1150,7 +1157,7 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
   }
   if (queuedDouble || gen !== pickGen) return   // 위치를 기다리는 사이에 다른 데로 갔다
   picksAt = Date.now()
-  log('candidates', candidates.length, '| 다음역', stops[1], '| 온 방면', all.filter(a => a.line === ln).map(a => a.toward).join(',') || '없음',
+  log('candidates', candidates.length, candidates.slice(0, 4).map(a => `${a.trainNo}:${a.etaSec}s`).join(' '), '| 다음역', stops[1], '| 온 방면', all.filter(a => a.line === ln).map(a => a.toward).join(',') || '없음',
     '| 조회이름', arrivalName(from), walkSec ? `| 걸어서 ${walkSec}초` : '')
 
   if (!candidates.length) {
@@ -1211,24 +1218,35 @@ function pickCandidates(all: Arrival[], exclude?: string): Arrival[] {
 // 조회가 한 건 더 든다(노선 전체 위치). 목록을 띄울 때와 20초 갱신 때만 부른다.
 async function liveCandidates(all: Arrival[], exclude?: string): Promise<Arrival[]> {
   let list = pickCandidates(all, exclude)
-  if (list.length) {
-    try {
-      const byNo = new Map((await positions(leg().line)).map(p => [p.trainNo, p]))
-      const now = Date.now()
-      let seen = 0
-      list = list.flatMap(a => {
-        const p = byNo.get(a.trainNo)
-        const eta = p ? etaFromPosition(leg().line, stops, p, now) : null
-        if (eta === 'gone') return []
-        if (eta == null) return [a]
-        seen += 1
-        return [{ ...a, etaSec: eta }]
-      })
-      log('pick positions', seen, '/', list.length)
-    } catch (e) {
-      if (e instanceof BurstError || e instanceof QuotaError) throw e
-      log('pick positions failed', e)
+  try {
+    const pos = await positions(leg().line)
+    const byNo = new Map(pos.map(p => [p.trainNo, p]))
+    const now = Date.now()
+    let seen = 0
+    list = list.flatMap(a => {
+      const p = byNo.get(a.trainNo)
+      const eta = p ? etaFromPosition(leg().line, stops, p, now) : null
+      if (eta === 'gone') return []
+      if (eta == null) return [a]
+      seen += 1
+      return [{ ...a, etaSec: eta }]
+    })
+    // 도착 정보에 없지만 위치 피드에서 이쪽으로 오는 열차도 후보로 넣는다. 도착 API가 다음 열차를 늦게 싣거나
+    // 묵은 기록만 보였다(10-03 논현 신분당선: 열차가 신사에 있는데 4분 동안 후보 0대).
+    const have = new Set(list.map(a => a.trainNo))
+    let added = 0
+    for (const p of pos) {
+      if (have.has(p.trainNo) || p.trainNo === exclude || gone.has(p.trainNo) || approaching(leg().line, stops, p) < 0) continue
+      const eta = etaFromPosition(leg().line, stops, p, now)
+      if (typeof eta !== 'number') continue
+      list.push({ trainNo: p.trainNo, station: stops[0], line: leg().line, etaSec: eta, msg: '', toward: stops[1], dest: p.terminal,
+        express: p.express, last: false, ageSec: 0, code: 99 })
+      added += 1
     }
+    log('pick positions', seen, '/', list.length, added ? `+${added} 위치에서` : '')
+  } catch (e) {
+    if (e instanceof BurstError || e instanceof QuotaError) throw e
+    log('pick positions failed', e)
   }
   // 나이를 빼고도 45초 넘게 지난 열차는 이미 떠났다
   return list.filter(a => a.etaSec > -45).sort((a, b) => a.etaSec - b.etaSec).slice(0, 18)
@@ -1614,7 +1632,7 @@ async function renderNow(): Promise<void> {
   if (left <= 2) {
     return show(S.alight({
       now, stopsLeft: left, dest, next: stops[guess.index + 1], arriveAt: legAt,
-      note: note || undefined, then: trip!.legs[legIndex + 1]?.line,
+      note: note || undefined, then: trip!.legs[legIndex + 1]?.line, fast: xferHere()?.off ?? undefined,
       estimated: guess.estimated > 0 || guess.stale, refresh: refresh(), hint: hintNow(),
       seenMin: guess.stale ? Math.max(1, Math.round((now - (lastFix.seen ?? lastFix.at)) / 60_000)) : undefined,
     }))
@@ -1668,6 +1686,14 @@ async function arrive(): Promise<void> {
   const nextLeg = trip!.legs[legIndex + 1]
   if (nextLeg) {
     mode = 'transfer'
+    // 걷는 시간은 타던 열차가 환승역에 선 때부터 센다. 앱이 '떠났다'를 확인한 뒤부터 세면 1~2분 늦어서,
+    // 사용자가 탄 열차보다 한두 대 뒤 열차를 태웠다(10-02 밤 신당·태릉입구: 7분 넘게 늦은 열차).
+    const here = fixes.find(f => f.station === stops[stops.length - 1])
+    xferArrivedAt = here ? (here.stop ?? here.arr ?? here.at) : Date.now()
+    const ft = xferHere()
+    xferWalkSec = Math.min(420, Math.max(60, ft?.walkSec ?? TRANSFER_WALK_SEC))
+    log('transfer at', stops[stops.length - 1], 'arrived', new Date(xferArrivedAt).toTimeString().slice(0, 8), 'walk', xferWalkSec + 's',
+      ft ? `off ${ft.off ?? '-'} on ${ft.on ?? '-'}` : 'no fast-transfer data')
     startTransferWatch()
     // 최종 도착 예정은 지금 한 번 정해 고정한다(현재시각으로 세면 매분 밀렸다). 걷기·기다림을 환승 1회 4분으로 친다.
     // restMinutes(legIndex + 1)는 그 뒤의 환승만 센다. 지금 하는 환승을 빼먹어 4분 이르게 말했다(리뷰 3라운드).
@@ -1681,6 +1707,7 @@ async function arrive(): Promise<void> {
       rest: trip!.legs.slice(legIndex + 1).reduce((n, l) => n + l.stops.length - 1, 0),
       finalAt,
       finalDest: trip!.to,
+      on: ft?.on ?? undefined,
     }))
   }
   mode = 'arrived'
@@ -1715,7 +1742,7 @@ function startTransferWatch(): void {
   let deadline = Date.now() + limit
   const advance = (why: string) => {
     stopTransferWatch()
-    if (mode === 'transfer' && legIndex === idx && !busy) { log('transfer auto', why); void startLeg(idx + 1, false, FAST_POLL ? 0 : TRANSFER_WALK_SEC) }
+    if (mode === 'transfer' && legIndex === idx && !busy) { log('transfer auto', why); void startLeg(idx + 1, false, FAST_POLL ? 0 : xferWalkSec, xferArrivedAt) }
   }
   if (!tn) { transferTimer = later(() => advance('timeout'), limit); return }
   transferPoll = every(() => {
@@ -1777,7 +1804,7 @@ async function onTap(index: number): Promise<void> {
     if (inMissWindow()) return repick('missed train')
     return showMenu()
   }
-  if (mode === 'transfer') return startLeg(legIndex + 1, false, FAST_POLL ? 0 : TRANSFER_TAP_WALK_SEC)
+  if (mode === 'transfer') return startLeg(legIndex + 1, false, FAST_POLL ? 0 : Math.min(xferWalkSec, TRANSFER_TAP_WALK_SEC), xferArrivedAt)
   return showOrigin()                                            // arrived
 }
 

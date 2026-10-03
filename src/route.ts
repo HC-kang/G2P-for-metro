@@ -1,4 +1,5 @@
 import { neighbors, nodesOf, stationAt, node } from './stations.ts'
+import transfers from './transfers.json' with { type: 'json' }
 
 export type Leg = { line: string; stops: string[] }   // stops[0] 승차역, 마지막이 하차역
 export type Plan = { from: string; to: string; legs: Leg[] }
@@ -323,6 +324,19 @@ export function etaFromPosition(line: string, stops: string[], pos: { station: s
   return Math.max(-30, Math.round((approachEta(pos.at, pos.status, n, false) - now) / 1000))
 }
 
+// 위치 피드의 열차가 이 구간의 출발역으로 다가오며 같은 방향(stops[1] 쪽)으로 가는가. 몇 정거장 앞인지, 아니면 -1.
+// 도착 API가 다음 열차를 늦게 싣거나 묵은 기록만 보일 때 쓴다(10-03 논현 신분당선: 4분 동안 후보 0대, 열차는 신사에 있었다).
+// 순환선(2호선)은 최단 거리로 방향을 가를 수 없어 쓰지 않는다. 모르는 역이면 -1.
+export function approaching(line: string, stops: string[], pos: { station: string; terminal: string }, most = 8): number {
+  if (line === '2호선' || stops.length < 2 || stops.includes(pos.station)) return -1
+  const [o, nx] = stops, t = pos.terminal
+  const xo = hops(line, pos.station, o, 60), onx = hops(line, o, nx, 60), xnx = hops(line, pos.station, nx, 60)
+  if (xo < 1 || xo > most || onx < 1 || xo + onx !== xnx) return -1
+  if (t === nx) return xo
+  const ot = hops(line, o, t, 200), nxt = hops(line, nx, t, 200)
+  return ot > 0 && nxt >= 0 && onx + nxt === ot ? xo : -1
+}
+
 const lastOn = (stops: string[], fixes: Fix[]) => [...fixes].reverse().find(f => stops.includes(f.station))
 
 // 서울 피드는 '실시간'이지만 실제보다 늦다. 사건 시각에서 앱이 그 기록을 보기까지 09-30에는 16~59초(평균 38초),
@@ -472,4 +486,23 @@ export function reaches(line: string, stops: string[], dest: string): boolean {
   if (line === '2호선' || line === '6호선') return true
   const od = hops(line, o, dest, 200), ox = hops(line, o, x, 200), xd = hops(line, x, dest, 200)
   return od < 0 || ox < 0 || xd < 0 || ox + xd === od
+}
+
+// ---------- 빠른환승 ----------
+// 서울교통공사 환승정보(열린데이터광장 OA-22521, scripts/fetch-transfers.mjs). 환승역에서 내릴 칸-문, 갈아탈 칸-문, 걷는 시간.
+// 원본의 '타던 열차 방면'은 가끔 틀린다(신분당선 강남에 '역삼 방면'). 그 노선에서 그 역의 이웃 역일 때만 믿는다.
+type XferRow = [string, string, string, string | null, string, string, string | null, number | null]
+const XFER = transfers.rows as XferRow[]
+export type FastTransfer = { off: string | null; on: string | null; walkSec: number | null }
+// station: 환승역. from: 타던 노선과 그 전 역(prev). to: 갈아탈 노선과 그다음 역(next).
+export function fastTransfer(station: string, fromLine: string, prev: string, toLine: string, next: string): FastTransfer | null {
+  const rows = XFER.filter(r => r[0] === station && r[1] === fromLine && r[4] === toLine && r[5] === next)
+  if (!rows.length) return null
+  // 타던 열차는 prev에서 와서 station 너머로 간다. 방면은 station의 이웃 중 prev가 아닌 역이다.
+  const ahead = new Set(neighbors(node(fromLine, station)).map(e => stationAt(e.to)).filter(s => s && s.line === fromLine && s.name !== prev).map(s => s!.name))
+  const sure = rows.filter(r => ahead.has(r[2]))
+  // 방면을 믿을 수 없으면, 그 역 그 노선끼리 내릴 위치가 하나로 같을 때만 쓴다
+  const pick = sure[0] ?? (new Set(rows.map(r => r[3])).size === 1 ? rows[0] : null)
+  if (!pick) return { off: null, on: rows[0][6], walkSec: rows[0][7] }
+  return { off: pick[3], on: pick[6], walkSec: pick[7] }
 }
