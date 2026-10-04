@@ -199,3 +199,6 @@
 - SDK 0.0.15: `bridge.imuControl(true, ImuReportPace.P100~P1000)` → `sysEvent.eventType === IMU_DATA_REPORT`, `sysEvent.imuData {x,y,z}`. 단위·축은 문서에 없다.
 - 다른 개발자 기록(planetarium-even-g2, zenn): 값은 중력 기반(가속도), 초당 약 10번. 고개를 좌우로 돌리는 것은 잡히지 않는다. 자이로·지자기(나침반) 값은 SDK로 나오지 않는다(하드웨어에는 지자기 센서가 있다고 회사 블로그가 말한다).
 - 그래서 '사용자가 보는 방향 기준 문 방향'은 나침반으로 못 한다. 가능성은 가속도뿐이다: 출발·제동 때 수평 가속(약 0.1g)이 머리 기준 어느 축에 보이는지로 진행 방향 대비 얼굴 방향을 추정. 고개 기울기 6°가 0.1g와 같아 섞인다. 실기기 기록으로 먼저 확인해야 한다.
+- 갱신: 공식 Navigate 앱(도보·자전거)은 안경 지자기 센서로 머리 방향을 쓴다. SDK 최신 0.0.16(2026-09-24)에도 나침반·방향 API는 없다(메서드 목록 확인).
+  SDK로 만든 even-simple-compass도 폰 나침반(deviceorientation, webkitCompassHeading)을 쓴다. appsbridge(비공식)도 폰 지자기다. 안경 나침반은 1st-party 전용이다.
+- SDK 0.0.16 변경: "setTimeout/setInterval 콜백이 반복 실행되던 문제 수정". 이 앱은 0.0.15이고 타이머를 많이 쓴다. 올릴 가치가 있다(미적용).
