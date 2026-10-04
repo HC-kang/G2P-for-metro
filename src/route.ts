@@ -1,5 +1,6 @@
 import { neighbors, nodesOf, stationAt, node } from './stations.ts'
 import transfers from './transfers.json' with { type: 'json' }
+import doors from './doors.json' with { type: 'json' }
 
 export type Leg = { line: string; stops: string[] }   // stops[0] 승차역, 마지막이 하차역
 export type Plan = { from: string; to: string; legs: Leg[] }
@@ -505,4 +506,24 @@ export function fastTransfer(station: string, fromLine: string, prev: string, to
   const pick = sure[0] ?? (new Set(rows.map(r => r[3])).size === 1 ? rows[0] : null)
   if (!pick) return { off: null, on: rows[0][6], walkSec: rows[0][7] }
   return { off: pick[3], on: pick[6], walkSec: pick[7] }
+}
+
+// ---------- 내리실 문 ----------
+// 승강장 형식(scripts/fetch-doors.mjs: 국토교통부·서울교통공사 공공데이터)과 노선의 통행 방향으로 정한다.
+// 우측 통행이면 섬식은 왼쪽, 상대식은 오른쪽이다. 좌측 통행이면 반대다. 틀린 방향은 안 알려주는 것보다 나쁘다.
+// 그래서 확실하지 않으면 null이다: 통행 방향을 모르는 노선, 복합식·자료가 엇갈린 역, 종착역(들어오는 선로가 바뀐다),
+// 이 역에서 끝나는 열차(회차 선로로 들어갈 수 있다), 응암순환(한 방향 고리).
+// 통행 방향: 위키백과·나무위키(2026-10 확인). 신분당선·공항철도·서해선·GTX-A·1호선은 좌측 통행이다.
+const RIGHT_HAND = new Set(['2호선', '3호선', '4호선', '5호선', '6호선', '7호선', '8호선', '9호선', '우이신설선', '신림선',
+  '의정부경전철', '용인경전철', '김포도시철도', '인천선', '인천2호선'])
+const LEFT_HAND = new Set(['1호선', '공항철도', '서해선', 'GTX-A', '신분당선'])
+const LOOP = new Set(['응암', '역촌', '불광', '독바위', '연신내', '구산'])
+const DOORS = doors.doors as Record<string, Record<string, string>>
+export function doorSide(line: string, station: string, trainDest = ''): '왼쪽' | '오른쪽' | null {
+  const kind = DOORS[line]?.[station]
+  const right = RIGHT_HAND.has(line), left = LEFT_HAND.has(line)
+  if (!kind || (!right && !left) || trainDest === station || (line === '6호선' && LOOP.has(station))) return null
+  // ponytail: 4호선 남태령 너머(과천·안산선, 좌측 통행)는 자료에 없어 여기까지 오지 않는다. 자료가 생기면 구간을 나눈다
+  if (neighbors(node(line, station)).filter(e => e.to.startsWith(`${line}|`)).length < 2) return null
+  return (kind === '섬식') === right ? '왼쪽' : '오른쪽'
 }

@@ -285,6 +285,8 @@ test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', asyn
     }
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, note: '지선 이탈', refresh: R, estimated: true }), `alight2 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 1, dest: n, next: n, arriveAt: T + 120_000, refresh: R }), `alight1 ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 1, dest: n, next: n, arriveAt: T + 120_000, refresh: R, door: '오른쪽' }), `alight1 문 ${n}`)
+    ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, fast: '10-4', refresh: R, estimated: true, seenMin: 12, door: '' }), `alight 끊김 빠른환승 문 ${n}`)
     ok(S.arrived(T, n), `arrived ${n}`)
     ok(S.transfer({ now: T, station: n, from: line, to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n, note: '반대 방향' }), `transfer ${n}`)
     ok(S.transfer({ now: T, station: n, from: '9호선', to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n }), `transfer 반대 ${n}`)
@@ -294,7 +296,7 @@ test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', asyn
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R }), `alight 환승 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R, estimated: true, seenMin: 12 }), `alight 끊김 환승 ${n}`)
     // 추정·환승·긴 역 이름을 함께: 역 이름 묶음('…환승')과 설명 사이 빈 줄이 남아야 한다(리뷰 4라운드)
-    const est = S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R, estimated: true })
+    const est = S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, refresh: R, estimated: true, door: '' })
     ok(est, `alight 추정 환승 ${n}`)
     const ls = est.split('\n'), i = ls.findIndex(l => l.includes('도착'))
     assert.equal(ls[i - 1], '', `alight 추정 환승 ${n}: 설명 위 빈 줄이 없다\n${est}`)

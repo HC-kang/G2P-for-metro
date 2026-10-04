@@ -16,7 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
-import { plan, routeChoices, continued, etaFromPosition, approaching, fastTransfer, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
+import { plan, routeChoices, continued, etaFromPosition, approaching, fastTransfer, doorSide, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, missedAway, MAX_ACCURACY_M, type Near, type WaitFix } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
@@ -1696,6 +1696,7 @@ async function renderNow(): Promise<void> {
     return show(S.alight({
       now, stopsLeft: left, dest, next: stops[guess.index + 1], arriveAt: legAt,
       note: note || undefined, then: trip!.legs[legIndex + 1]?.line, fast: xferHere()?.off ?? undefined,
+      door: doorSide(leg().line, dest, train!.dest) ?? '',
       estimated: guess.estimated > 0 || guess.stale, refresh: refresh(), hint: hintNow(),
       seenMin: guess.stale ? Math.max(1, Math.round((now - (lastFix.seen ?? lastFix.at)) / 60_000)) : undefined,
     }))

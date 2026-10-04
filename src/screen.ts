@@ -298,6 +298,7 @@ export function alight(a: {
   note?: string; then?: string; estimated?: boolean; refresh: Refresh; hint?: string
   seenMin?: number   // 신호가 끊겼다. 마지막 관측이 몇 분 전인지
   fast?: string      // 빠른환승: 갈아탈 때 가장 가까운 칸-문('1-1')
+  door?: '왼쪽' | '오른쪽' | ''   // 내리실 문(route.doorSide). ''는 확실하지 않음. 없으면 줄을 두지 않는다
 }): string {
   const verb = a.then ? '갈아타세요' : '내리세요'
   const title = a.stopsLeft <= 1 ? `다음 역에서 ${verb}` : `두 정거장 뒤 ${verb}`
@@ -315,9 +316,18 @@ export function alight(a: {
   // 강조 블록: 역 이름과 그에 붙는 한 줄은 IN. 나머지 설명은 PAD. 하차·환승·도착 화면 공통.
   // 빠른환승 칸-문은 환승 노선 줄에 붙인다. 넘치면 그 아래 줄(같은 들여쓰기).
   const then = !a.then ? [] : a.fast ? joinOrSplit(`${ro(a.then)} 환승`, `빠른환승 ${a.fast}`, IN) : [`${IN}${ro(a.then)} 환승`]
-  return page([head(a.now, a.note ?? (a.then ? '환승' : '하차')), '', `${PAD}${title}`, '',
-    `${IN}${hero(a.dest, 6)}`, ...then, '', ...detail],
-  [`${PAD}${refreshLine(a.refresh)}`, `${PAD}${a.hint ?? '탭: 메뉴'}`])
+  // 내리실 문은 제목 바로 아래(차내 안내 방송과 같은 순서). 확실하지 않은 역은 그렇다고 밝힌다.
+  // 줄이 있다 없다 하면 이 역에서 안내가 빠진 것인지 알 수 없다.
+  const door = a.door == null ? [] : [`${PAD}${a.door ? `내리실 문은 ${a.door}입니다` : '내리실 문 정보가 없습니다'}`]
+  const tail = [`${PAD}${refreshLine(a.refresh)}`, `${PAD}${a.hint ?? '탭: 메뉴'}`]
+  const body = (gap: boolean) => [head(a.now, a.note ?? (a.then ? '환승' : '하차')), '', `${PAD}${title}`, ...door,
+    ...(gap ? [''] : []), `${IN}${hero(a.dest, 6)}`, ...then, '', ...detail]
+  // 넘치면 제목 묶음 아래 빈 줄을 먼저 버린다. page는 아래 빈 줄부터 버려서 역 이름 묶음과 설명이 붙었다(리뷰 4라운드).
+  // 머리줄 아래 빈 줄 하나는 page가 먼저 버린다. 시험 배치의 줄바꿈은 세지 않는다.
+  const widows = layStats.widows
+  const gap = lay(body(true)).length - 1 <= MAX_LINES - lay(tail).length
+  layStats.widows = widows
+  return page(body(gap), tail)
 }
 
 // 도착은 관측이 피드 지연만큼 늦게 뜬다(30~55초). 이미 내린 뒤일 수 있으니 명령이 아니라 확인이다.

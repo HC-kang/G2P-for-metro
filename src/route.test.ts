@@ -1,6 +1,6 @@
 import test from 'node:test'
 import assert from 'node:assert/strict'
-import { plan, reaches, stopsLeft, alternatives, routeChoices, continued, fastTransfer, type Plan } from './route.ts'
+import { plan, reaches, stopsLeft, alternatives, routeChoices, continued, fastTransfer, doorSide, type Plan } from './route.ts'
 
 const shape = (from: string, to: string) =>
   plan(from, to)?.legs.map(l => `${l.line}:${l.stops.length - 1}`).join(' ') ?? '실패'
@@ -418,4 +418,19 @@ test('위치 피드에서 출발역으로 다가오며 같은 방향으로 가�
   assert.equal(approaching('7호선', l7, { station: '수락산', terminal: '석남' }), 4)
   assert.equal(approaching('7호선', l7, { station: '도봉산', terminal: '석남' }, 3), -1)     // 너무 멀다
   assert.equal(approaching('2호선', ['홍대입구', '신촌'], { station: '합정', terminal: '성수' }), -1)   // 순환선은 쓰지 않는다
+})
+
+// 승강장 형식은 공공데이터(scripts/fetch-doors.mjs). 자료가 바뀌면 기대값도 바뀔 수 있다.
+test('내리실 문: 확실한 역만 방향을 주고, 나머지는 null', () => {
+  assert.equal(doorSide('7호선', '하계'), '왼쪽')           // 섬식, 우측 통행
+  assert.equal(doorSide('7호선', '태릉입구'), '오른쪽')     // 상대식
+  assert.equal(doorSide('6호선', '신당'), '왼쪽')
+  assert.equal(doorSide('2호선', '홍대입구'), '왼쪽')       // 2호선은 서울교통공사 자료로만 채운다
+  assert.equal(doorSide('신분당선', '논현'), '왼쪽')        // 상대식이지만 좌측 통행
+  assert.equal(doorSide('공항철도', '홍대입구'), '왼쪽')    // 상대식, 좌측 통행
+  assert.equal(doorSide('6호선', '석계'), null)             // 두 자료가 엇갈린다
+  assert.equal(doorSide('6호선', '연신내'), null)           // 응암순환
+  assert.equal(doorSide('2호선', '신설동'), null)           // 종착역
+  assert.equal(doorSide('7호선', '하계', '하계'), null)     // 이 역에서 끝나는 열차
+  assert.equal(doorSide('경의중앙선', '홍대입구'), null)    // 자료 없음
 })
