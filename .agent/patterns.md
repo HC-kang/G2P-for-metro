@@ -119,3 +119,5 @@ dev server 로그(`/__log`)는 같은 Wi-Fi에서만 받으므로 지하철에 �
 - 2026-09-30: v0.5.1이 Hub에 올라갔다(85.5 KB, out.ehpk 85,493바이트와 일치). 순서: `orca click`으로 'Upload a build'를 먼저 눌러야 파일 입력이 생긴다 → `orca exec … "upload input[type=file] <경로>"` → Change log `fill` → 'Add build' → 목록 맨 위 버전 확인.
 - 패키징: `evenhub pack`은 --sdk-ver가 없으면 npm 최신 SDK의 min_app_version을 찍는다. package.json pack에 `--sdk-ver 0.0.15`를 넣었다. SDK 0.0.15 하한은 2.2.10이다.
 - 장애 주입: 모사 API는 `.dev/fault.json` {"status":502}|{"hang":true}|{"drop":true}를 따른다(vite.config.ts). 시험 스크립트 스크래치패드 run6.sh(주행), run7.sh(고르기).
+
+- 시뮬레이터 위치 모사: `.dev/gps.json`의 ts가 묵으면 앱은 그 측위를 '떠난 뒤 측위'로 쓰지 않는다. 사람이 서 있는 것을 흉내 내려면 2초마다 ts를 새로 써야 한다. 배경 루프의 조건 파일은 루프보다 먼저 만든다(`touch f; (while [ -f f ]; …) &`). 거꾸로 하면 루프가 바로 끝난다(10-04, scratchpad/miss.sh·made.sh).

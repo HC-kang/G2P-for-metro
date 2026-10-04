@@ -17,7 +17,7 @@ import {
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
 import { plan, routeChoices, continued, etaFromPosition, approaching, fastTransfer, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
-import { nearest, distanceM, MAX_ACCURACY_M, type Near } from './geo.ts'
+import { nearest, distanceM, missedAway, MAX_ACCURACY_M, type Near, type WaitFix } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
@@ -444,7 +444,7 @@ $('#send').addEventListener('click', async () => {
 })
 $('#glyph').addEventListener('click', async () => {
   // 안경 폰트의 글리프 유무는 실기기에서만 안다. 줄 번호로 보고받아 스피너 글리프를 고른다.
-  stopPolling(); stopOriginWatch(); stopTransferWatch()
+  stopPolling(); stopLocation(); stopTransferWatch()
   mode = 'arrived'   // 탭하면 처음으로
   rows = []
   const lines = ['1 ⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏', '2 ◐◓◑◒ ◌ ◎ ◉', '3 ▁▂▃▄▅▆▇█ ░▒▓', '4 ←→↑↓ ⇢ ➜ ▶ ▷', '5 ●○━─ ✓ ✗ ⏳', '6 ★☆ ♥ ⌛ ⚠', '7 · ≈ ⋯ ▸ … ▪ ◆ ◇']
@@ -670,7 +670,8 @@ const dist = (m: number, rough: boolean): string =>
   m < 100 ? (rough ? '근처' : '바로 앞')
     : rough ? `약 ${m < 950 ? `${Math.round(m / 100) * 100}m` : `${(m / 1000).toFixed(1)}km`}`   // 950m 이상은 '1000m'가 아니라 '1.0km'
     : m < 1000 ? `${m}m` : `${(m / 1000).toFixed(1)}km`
-const ORIGIN_WATCH_MS = 180_000
+// 멀리서 걸어오며 목록을 보는 일이 있다. 10분까지 측위로 목록을 고친다(10-02·10-03: 200~300m 밖에서 골랐다).
+const ORIGIN_WATCH_MS = 600_000
 
 type Loc = { latitude: number; longitude: number; accuracy?: number; timestamp?: number }
 
@@ -714,11 +715,11 @@ async function simLocation(): Promise<Loc | null> {
 // 첫 호출이 null을 주는 것을 실기기에서 봤다. 한 번 더 부른다.
 async function quickFix(): Promise<Loc | null> {
   const sim = await simLocation()
-  if (sim) return sim
+  if (sim) { lastLoc = toFix(sim); return sim }
   for (let i = 0; i < 2; i++) {
     try {
       const l = await bridge.getAppLocation({ accuracy: AppLocationAccuracy.High, timeoutMs: GPS_TIMEOUT_MS })
-      if (l && Number.isFinite(l.latitude)) return l
+      if (l && Number.isFinite(l.latitude)) { lastLoc = toFix(l); return l }
     } catch (e) {
       log('gps failed', i, e)
     }
@@ -772,17 +773,30 @@ function originCandidates(fix: Loc | null): { name: string; label: string }[] {
 
 let originGen = 0
 let originTop = ''
-let originWatch: ReturnType<typeof setInterval> | null = null
-let originUnsub: (() => void) | null = null
-
-function stopOriginWatch(): void {
-  if (originWatch) clearInterval(originWatch)
-  originWatch = null
-  if (originUnsub) {
-    originUnsub()
-    originUnsub = null
-    Promise.resolve(bridge.stopAppLocationUpdates()).catch(() => {})
+// 위치 구독은 하나뿐이다(출발역 목록, 첫 열차 기다리기). 새로 걸면 앞의 것을 끊는다.
+// 세대를 둔다. 끊은 뒤에 도착한 측위(시뮬레이터 조회가 늦게 끝남)가 새 구독을 끄지 않게 한다.
+let locStop: (() => void) | null = null
+let locGen = 0
+let lastLoc: WaitFix | null = null   // 마지막으로 받은 측위. 첫 열차 기다리기가 '고를 때 위치'로 쓴다
+const toFix = (l: Loc): WaitFix => ({ lat: l.latitude, lon: l.longitude, acc: l.accuracy ?? 999, t: tsMs(l.timestamp) ?? Date.now() })
+function watchLocation(handler: (l: Loc) => void): void {
+  stopLocation()
+  const g = locGen
+  const onFix = (l: Loc) => { if (g === locGen && Number.isFinite(l.latitude)) { lastLoc = toFix(l); handler(l) } }
+  if (simFeed) {
+    const t = every(() => { void simLocation().then(l => { if (l) onFix(l) }) }, 3000)
+    locStop = () => clearInterval(t)
+    return
   }
+  const unsub = bridge.onAppLocationChanged(onFix)
+  Promise.resolve(bridge.startAppLocationUpdates({ accuracy: AppLocationAccuracy.High, intervalMs: 3000 }))
+    .catch(e => log('gps updates unsupported', e))
+  locStop = () => { unsub(); Promise.resolve(bridge.stopAppLocationUpdates()).catch(() => {}) }
+}
+function stopLocation(): void {
+  locGen += 1
+  locStop?.()
+  locStop = null
 }
 
 async function renderOrigin(fix: Loc | null): Promise<boolean> {
@@ -814,7 +828,7 @@ function startOriginWatch(gen: number, since: number): void {
   const onFix = async (l: Loc) => {
     if (gen !== originGen || mode !== 'origin' || busy || menuOpen) return
     // 이 화면에 오래 머물면 GPS를 끈다. 배터리를 먹으면서 아무도 안 보는 목록을 고치는 일은 없다.
-    if (Date.now() - since > ORIGIN_WATCH_MS) return stopOriginWatch()
+    if (Date.now() - since > ORIGIN_WATCH_MS) return stopLocation()
     const t = tsMs(l.timestamp)
     if (t != null && t < since) return          // 요청 전에 찍힌 묵은 값이다
     log('gps push', l.latitude, l.longitude, 'acc', l.accuracy, 'ts', l.timestamp, 'age', ageSec(l))
@@ -824,13 +838,7 @@ function startOriginWatch(gen: number, since: number): void {
       await renderOrigin(l)
     }
   }
-  if (simFeed) {
-    originWatch = every(() => { void simLocation().then(l => { if (l) void onFix(l) }) }, 3000)
-  } else {
-    originUnsub = bridge.onAppLocationChanged(l => { void onFix(l) })
-    Promise.resolve(bridge.startAppLocationUpdates({ accuracy: AppLocationAccuracy.High, intervalMs: 3000 }))
-      .catch(e => log('gps updates unsupported', e))
-  }
+  watchLocation(l => { void onFix(l) })
 }
 
 // 여정을 떠나기 직전 상태. 5분 동안 출발역 목록 맨 위에 '← 청담 안내 이어가기'로 되돌린다.
@@ -845,7 +853,7 @@ let resume: Resume | null = null
 let repickFrom: Resume | null = null
 const RESUME_MS = 5 * 60_000
 async function resumeTrip(r: Resume): Promise<void> {
-  stopOriginWatch()
+  stopLocation()
   ;({ trip, legIndex, stops, train, fixes, boardedAt, departedAt, approach, approachStatus, lastSeen, prevSeen, atStatus, note, origin } = r)
   log('resume', r.mode, r.trip.to)
   if (r.mode === 'riding' && train) {
@@ -936,7 +944,7 @@ async function showOrigin(intentional = false): Promise<void> {
   menuOpen = false
   stopPolling()
   stopTransferWatch()
-  stopOriginWatch()
+  stopLocation()
   const gen = ++originGen
   const since = Date.now()
   // 위치가 금방 오면 목록으로 바로 간다. 늦으면(실기기에서 최대 10초) 탭이 먹혔다는 것부터 보인다.
@@ -1037,6 +1045,8 @@ async function chooseRoute(dest: string): Promise<void> {
 async function startTrip(picked: Plan): Promise<void> {
   trip = picked
   const dest = picked.to
+  // 주행 중에 나와 다시 고른 여정은 사용자가 지하·열차 안에 있다. 위치로 '놓침'을 판단하지 않는다.
+  streetTrip = resume?.departedAt && Date.now() - resume.at < 10 * 60_000 ? null : picked
   await rememberOrigin(origin)
   // 주행 중에 나와 타던 구간의 역에서 같은 도착지로 다시 골랐다. 실제로 탄 길을 원래 출발역의 '지난번에 고른 길'로 배운다.
   // 다음에는 그 길이 맨 위(★)다. 사용자가 날마다 ★를 누르고 중간에 다시 고르는 일을 없앤다.
@@ -1198,8 +1208,9 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
   } else if (candidates.length === 1 && autoBoard) return board(candidates[0])
 
   await showPickList(candidates, from, ln)
-  // 목록을 보는 동안 20초마다 다시 조회한다. 떠난 열차는 빠지고 새 열차가 들어온다. 10분 뒤에는 멈춘다(조회 예산).
-  schedulePickRefresh(gen, Date.now() + 10 * 60_000)
+  // 목록을 보는 동안 다시 조회한다. 떠난 열차는 빠지고 새 열차가 들어온다. 멀리서 목록을 켜 두고 걸어오는 일이 있어
+  // 30분까지 본다. 처음 10분은 20초, 그 뒤는 60초 간격(조회 예산). 30분 뒤에는 멈춘다.
+  schedulePickRefresh(gen, Date.now() + 30 * 60_000)
 }
 
 // 같은 노선, 같은 방향만. 방향은 "…방면" 역이 다음 역과 같은지로 가른다. updnLine은 읽지 않는다.
@@ -1317,7 +1328,7 @@ function schedulePickRefresh(gen: number, until: number): void {
       }
     } catch (e) { log('pick refresh failed', e) }
     schedulePickRefresh(gen, until)
-  }, FAST_POLL ? 8_000 : 20_000)
+  }, FAST_POLL ? 8_000 : until - Date.now() > 20 * 60_000 ? 20_000 : 60_000)
 }
 
 let picks: Arrival[] = []
@@ -1344,6 +1355,7 @@ async function board(a: Arrival, keepEta = false): Promise<void> {
   lags = []
   aheadOf = ''
   departedAt = 0
+  missedFrom = null
   resume = null
   repickFrom = null
   approach = ''
@@ -1369,6 +1381,57 @@ async function board(a: Arrival, keepEta = false): Promise<void> {
   nextPollAt = Date.now()
   // 탭 핸들러 안에서는 busy라 poll이 조회를 건너뛴다. 실기기에서 첫 조회가 20초 늦었다. 핸들러가 끝난 직후에 돈다.
   schedulePoll(pollGen, 0, 'boarded')
+  startWaitWatch()
+}
+
+// ---------- 멀리서 고른 열차 ----------
+// 역 밖에서 열차를 고르고 걸어가다 놓치는 일이 있다(10-02 홍대입구 241m, 10-03 하계 295m: 둘 다 손으로 다시 골랐다).
+// 첫 구간 열차를 기다리는 동안 위치를 받는다. 열차가 떠난 뒤에도 역 밖이면(geo.missedAway) 앱이 그 열차를 버리고
+// 걸어서 닿을 첫 열차를 태운다. 그 열차도 놓치면 같은 일을 한다. 환승 구간과, 주행 중에 나와 다시 고른 여정은 보지 않는다
+// (지하·열차 안 측위는 믿지 못한다). 잘못 본 것이면 2분 동안 탭 한 번으로 되돌린다.
+let streetTrip: Plan | null = null   // 역 밖에서 시작한 여정
+let missedFrom: Resume | null = null // 놓쳤다고 보고 버린 추적
+let missedAt = 0
+const canUndoMiss = () => !!missedFrom && mode === 'riding' && !fixes.length && Date.now() - missedAt < 120_000
+
+function startWaitWatch(): void {
+  if (streetTrip !== trip || legIndex !== 0 || !train) return
+  const no = train.trainNo
+  const since = Date.now()
+  // 고를 때 받은 측위도 넣는다(10분 안). 서 있으면 새 측위가 드물게 온다.
+  const seen: WaitFix[] = lastLoc && since - lastLoc.t < 10 * 60_000 ? [lastLoc] : []
+  // 다른 열차로 바뀌었거나, 떠난 지 2분이 지났거나(판단할 측위 구간이 끝남), 30분을 넘게 기다렸다
+  const done = () => mode !== 'riding' || train?.trainNo !== no || (departedAt > 0 && Date.now() - departedAt > 120_000) || Date.now() - since > 30 * 60_000
+  watchLocation(l => {
+    if (done()) return
+    seen.push(toFix(l))
+    if (!departedAt || busy) return
+    const o = COORDS.find(c => c.name === stops[0])
+    const d = o ? missedAway(seen, o, COORDS.filter(c => stops.slice(1, 4).includes(c.name)), departedAt) : null
+    if (d != null) void missedTrain(d)
+  })
+  // 끄는 일은 타이머가 한다. 지하에서는 측위가 아예 안 와서, 측위를 받을 때 끄면 구독이 남았다.
+  const g = locGen
+  const t = every(() => {
+    if (g !== locGen) return clearInterval(t)
+    if (!done()) return
+    clearInterval(t)
+    log('wait gps off', no, seen.length)
+    stopLocation()
+  }, 5000)
+}
+
+async function missedTrain(d: number): Promise<void> {
+  stopLocation()
+  const snap = snapshot()
+  // ponytail: 직선거리를 빠른 걸음으로 나눈다. 짧게 잡아 못 닿는 열차를 태우면 그 열차가 떠날 때 또 잡는다
+  const walkSec = Math.round(d / 1.4)
+  log('missed by location', train!.trainNo, stops[0], Math.round(d) + 'm', 'walk', walkSec + 's')
+  gone.add(train!.trainNo)
+  stopPolling()
+  walkUntil = Date.now() + walkSec * 1000
+  await showPick(true, true, walkSec)
+  if (mode === 'riding') { missedFrom = snap; missedAt = Date.now(); void render() }
 }
 
 // 폴링 예약은 언제나 하나뿐이다. 새로 걸기 전에 걸려 있던 것을 지운다.
@@ -1583,7 +1646,7 @@ const CONFIRM = '더블탭 한 번 더: 처음으로'
 // 출발 직후 2분은 탭 한 번이 '다음 열차 고르기'다. 놓쳤을 때 메뉴를 거치지 않고 바로 복구한다(리뷰 1라운드).
 const MISS_WINDOW_MS = 120_000
 const inMissWindow = () => mode === 'riding' && departedAt > 0 && Date.now() - departedAt < MISS_WINDOW_MS
-const hintNow = () => (inMissWindow() ? '탭: 못 탔으면 다음 열차' : '탭: 메뉴')
+const hintNow = () => (canUndoMiss() ? '앞 열차를 놓쳐 바꿨습니다\n탭: 탔으면 되돌리기' : inMissWindow() ? '탭: 못 탔으면 다음 열차' : '탭: 메뉴')
 
 async function render(): Promise<void> {
   if (rendering || menuOpen) return
@@ -1771,7 +1834,7 @@ async function onTap(index: number): Promise<void> {
     if (!pick) return showOrigin()   // 안내행이나 실패 화면은 rows가 비어 있다
     if (pick === '__resume' && resume) { const r = resume; resume = null; return resumeTrip(r) }
     // 되돌리기는 여기서 지우지 않는다. 새 열차를 탈 때(board) 지운다. 출발역을 잘못 눌러 뒤로 와도 남는다(리뷰 3라운드).
-    stopOriginWatch()
+    stopLocation()
     origin = pick
     return showDest()
   }
@@ -1799,6 +1862,14 @@ async function onTap(index: number): Promise<void> {
       if (pick === '열차 다시 고르기') return repick('menu')
       if (pick === '처음으로') return showOrigin(true)
       return render()   // 계속 보기 또는 알 수 없는 행
+    }
+    // 위치로 '놓침'을 판단해 다음 열차로 바꾼 직후라면 탭 한 번이 되돌리기다.
+    if (canUndoMiss()) {
+      const r = missedFrom!
+      missedFrom = null
+      log('undo missed', r.train?.trainNo)
+      if (r.train) gone.delete(r.train.trainNo)
+      return resumeTrip(r)
     }
     // 출발 직후라면 탭 한 번이 '다음 열차'다. 놓쳤을 때 메뉴를 거치지 않는다.
     if (inMissWindow()) return repick('missed train')
@@ -1832,7 +1903,7 @@ async function handle(type: OsEventTypeList, index: number): Promise<void> {
       const action = doubleTapAction(tapState())
       log('double tap', mode, action)
       if (action === 'exit') {
-        stopPolling(); stopOriginWatch(); stopTransferWatch()
+        stopPolling(); stopLocation(); stopTransferWatch()
         await bridge.shutDownPageContainer(1)
       } else if (action === 'closeMenu') closeMenu('double tap')
       // 목록에서는 한 단계 뒤로. 처음으로 튀지 않는다(리뷰 1라운드).
@@ -1874,7 +1945,7 @@ const unsubscribe = bridge.onEvenHubEvent(async event => {
     clearInterval(shadowLog)
     endLog()
     stopPolling()
-    stopOriginWatch()
+    stopLocation()
     stopTransferWatch()
     clearInterval(ticker)
     return unsubscribe()
@@ -1922,7 +1993,7 @@ const idleTimer = every(() => {
   if (active) idleSince = Date.now()
   if (active || busy || Date.now() - Math.max(lastInputAt, idleSince) < IDLE_EXIT_MS) return
   log('idle exit', mode)
-  stopPolling(); stopOriginWatch(); stopTransferWatch()
+  stopPolling(); stopLocation(); stopTransferWatch()
   clearInterval(ticker); clearInterval(idleTimer)   // 종료를 한 번만 요청한다. 호스트가 안 닫아도 매분 되풀이하지 않는다
   // SYSTEM_EXIT와 같은 정리. 종료 뒤에도 매분 기록(shadow ticks)과 로그 전송이 남았다(리뷰 3라운드, 시험 3).
   void keepTrail()

@@ -364,7 +364,7 @@ export function waiting(a: { now: number; line: string; toward: string; at: stri
     // 아직 위치를 못 받았으면 '위치 확인 중'이라고 쓰고 스피너를 붙인다.
     ...(a.at ? (a.away ? joinOrSplit(a.at, a.away) : [`${PAD}${a.at}`]) : [`${PAD}위치 확인 중  ${spin(a.now)}`]),
     `${PAD}${eta}`,
-  ], [`${PAD}${refreshLine(a.refresh)}`, `${PAD}${a.hint ?? '탭: 메뉴'}`])
+  ], [`${PAD}${refreshLine(a.refresh)}`, ...(a.hint ?? '탭: 메뉴').split('\n').map(h => `${PAD}${h}`)])
 }
 
 // 관측이 끊겼다. 추정임을 화면이 스스로 말한다.
