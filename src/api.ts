@@ -20,6 +20,7 @@ export type Arrival = {
   last: boolean   // 막차(lstcarAt=1). 목록에 표시한다
   ageSec: number  // 이 기록이 만들어진 지 몇 초 됐는지(recptnDt). etaSec은 이미 이만큼 뺀 값이다
   code: number    // arvlCd: 0 진입, 1 도착, 2 출발, 3 전역출발, 4 전역진입, 5 전역도착, 99 운행 중. 2면 이미 떠났다
+  seen?: boolean  // 후보를 고를 때 위치 피드에 있었는가. 위치를 못 받았으면 없다
 }
 
 // "광운대행 - 시청방면"           -> "시청"

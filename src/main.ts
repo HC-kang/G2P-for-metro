@@ -16,6 +16,7 @@ import {
   AppLocationAccuracy,
 } from '@evenrealities/even_hub_sdk'
 import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations.ts'
+import platforms from './platforms.json' with { type: 'json' }
 import { plan, routeChoices, continued, etaFromPosition, approaching, fastTransfer, doorSide, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, missedAway, MAX_ACCURACY_M, type Near, type WaitFix } from './geo.ts'
 import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
@@ -41,9 +42,19 @@ const log = (...a: unknown[]) => {
 }
 
 // 화면이 죽으면 메모리 기록도 사라진다. 그 직전 것이 가장 쓸모 있으므로 남긴다.
-const keepTrail = () => bridge.setLocalStorage('trail', trail.slice(-LOG_KEEP).join('\n'))
-window.addEventListener('error', e => { log('error', e.message); void keepTrail() })
-window.addEventListener('unhandledrejection', e => { log('rejection', e.reason); void keepTrail() })
+// 저장 실패는 삼킨다. 브리지가 끊긴 인스턴스에서는 저장도 거부되고, 그 거부가 다시 여기로 와 고리를 돌았다
+// (10-07: 안경 메뉴 실행이 실패해 버려진 인스턴스가 1초에 150번 'rejection InvalidAccessError'를 남겼다).
+const keepTrail = () => Promise.resolve(bridge.setLocalStorage('trail', trail.slice(-LOG_KEEP).join('\n'))).catch(() => {})
+// 같은 오류가 1분 안에 또 오면 기록하지 않는다.
+let lastErr = '', lastErrAt = 0
+const noteErr = (kind: string, what: unknown) => {
+  const m = `${kind} ${String(what)}`
+  if (m === lastErr && Date.now() - lastErrAt < 60_000) return
+  lastErr = m; lastErrAt = Date.now()
+  log(kind, what); void keepTrail()
+}
+window.addEventListener('error', e => noteErr('error', e.message))
+window.addEventListener('unhandledrejection', e => noteErr('rejection', e.reason))
 
 // SDK 0.0.15의 그림자 타이머는 한 번짜리 타이머를 두 번 부를 수 있다. 폰을 잠그고 타면 실제로 그랬고,
 // 폴링 사슬이 주기마다 두 배가 되어 몇 분 만에 앱이 멈췄다(constraints.md 2026-09-26).
@@ -1087,6 +1098,9 @@ let pickArgs = { autoBoard: true, walkSec: 0, prefer: 0, first: false }
 // 환승: 이 시각 전에 오는 열차는 걸어서 닿지 못한다. 구간을 시작할 때 정하고, 다시 조회해도 늘리지 않는다.
 let walkUntil = 0
 const walkLeft = () => Math.max(0, Math.ceil((walkUntil - Date.now()) / 1000))
+// 앱이 대신 고를 때는 위치 피드에서 본 열차를 먼저 쓴다. 도착 정보에만 있는 열차는 유령일 수 있다
+// (10-04 노원 7075: 11분 동안 '약 4분 뒤'에 머물렀고 위치 피드에는 끝내 없었다). 본 열차가 없으면 그대로.
+const trusted = (list: Arrival[]): Arrival[] => { const t = list.filter(a => a.seen !== false); return t.length ? t : list }
 // 걸어서 닿을 수 있는 열차. 걷는 시간이 다 지났으면(이미 승강장) 오는 열차는 다 탈 수 있다.
 const reachableOf = (list: Arrival[]): Arrival[] => { const w = walkLeft(); return w === 0 ? list : list.filter(a => a.etaSec >= w) }
 // 이번 구간에서 '이미 떠난 열차'로 확인된 열차번호. 다시 고르지 않는다. pickedAt은 열차를 고른(태운) 시각이다.
@@ -1193,17 +1207,18 @@ async function showPick(autoBoard = true, quiet = false, walkSec = 0, prefer = 0
       `${Math.max(0, Math.ceil((until - Date.now()) / 1000))}초 뒤 다시 확인`, `탭: 지금 확인\n${backHint()}`, `${from} ${ln}`))
   }
   emptySince = 0
-  if (first) return board(candidates[0])
+  if (first) return board(trusted(candidates)[0])
   if (prefer) {
     // 원래 예정과 2분 넘게 어긋나면 그 열차는 다음 열차일 가능성이 크다. 원래 열차를 계속 기다린다(리뷰 3라운드).
-    const c = closest(candidates, a => picksAt + a.etaSec * 1000, prefer)
-    if (Math.abs(picksAt + c.etaSec * 1000 - prefer) <= 120_000 || !train) return board(c)
+    // 원래 열차가 유령(gone)이면 기다릴 것이 없다. 가장 가까운 열차를 태운다.
+    const c = closest(trusted(candidates), a => picksAt + a.etaSec * 1000, prefer)
+    if (Math.abs(picksAt + c.etaSec * 1000 - prefer) <= 120_000 || !train || gone.has(train.trainNo)) return board(c)
     // 원래 열차를 지킨다. 옛 도착 정보를 새 조회 시각에 붙이면 예정이 30~45초씩 밀리고 다음 판단 기준도 밀렸다(리뷰 4라운드).
     return board(train, true)
   }
   // 환승 뒤 자동 진행: 걸어서 닿을 수 있는 첫 열차를 태운다. 닿을 열차가 없으면 목록을 보인다.
   if (autoBoard && walkSec) {
-    const reachable = reachableOf(candidates)
+    const reachable = trusted(reachableOf(candidates))
     if (reachable.length) return board(reachable[0])
   } else if (candidates.length === 1 && autoBoard) return board(candidates[0])
 
@@ -1238,9 +1253,9 @@ async function liveCandidates(all: Arrival[], exclude?: string): Promise<Arrival
       const p = byNo.get(a.trainNo)
       const eta = p ? etaFromPosition(leg().line, stops, p, now) : null
       if (eta === 'gone') return []
-      if (eta == null) return [a]
+      if (eta == null) return [{ ...a, seen: !!p }]
       seen += 1
-      return [{ ...a, etaSec: eta }]
+      return [{ ...a, etaSec: eta, seen: true }]
     })
     // 도착 정보에 없지만 위치 피드에서 이쪽으로 오는 열차도 후보로 넣는다. 도착 API가 다음 열차를 늦게 싣거나
     // 묵은 기록만 보였다(10-03 논현 신분당선: 열차가 신사에 있는데 4분 동안 후보 0대).
@@ -1251,7 +1266,7 @@ async function liveCandidates(all: Arrival[], exclude?: string): Promise<Arrival
       const eta = etaFromPosition(leg().line, stops, p, now)
       if (typeof eta !== 'number') continue
       list.push({ trainNo: p.trainNo, station: stops[0], line: leg().line, etaSec: eta, msg: '', toward: stops[1], dest: p.terminal,
-        express: p.express, last: false, ageSec: 0, code: 99 })
+        express: p.express, last: false, ageSec: 0, code: 99, seen: true })
       added += 1
     }
     log('pick positions', seen, '/', list.length, added ? `+${added} 위치에서` : '')
@@ -1317,7 +1332,7 @@ function schedulePickRefresh(gen: number, until: number): void {
       // 환승 자동 진행인데 아까는 닿을 열차가 없어 목록을 띄웠다. 닿을 수 있는 열차가 생기면 앱이 태운다.
       // 걷는 시간이 다 지났으면 가장 먼저 오는 열차다. 사용자가 목록에서 직접 고르기를 기다리지 않는다(10-02 재현에서 발견).
       if (pickArgs.autoBoard && pickArgs.walkSec && !repickFrom) {
-        const reachable = reachableOf(next)
+        const reachable = trusted(reachableOf(next))
         if (reachable.length) { picksAt = Date.now(); log('transfer auto board', reachable[0].trainNo); stop(); return board(reachable[0]) }
       }
       // 열차 번호가 바뀔 때만 다시 그린다(떠난 열차가 빠지거나 새 열차가 들어올 때). 도착 시각 기준도 그때만 바꾼다.
@@ -1398,6 +1413,7 @@ function startWaitWatch(): void {
   if (streetTrip !== trip || legIndex !== 0 || !train) return
   const no = train.trainNo
   const since = Date.now()
+  const origin = platformsOf(stops[0])
   // 고를 때 받은 측위도 넣는다(10분 안). 서 있으면 새 측위가 드물게 온다.
   const seen: WaitFix[] = lastLoc && since - lastLoc.t < 10 * 60_000 ? [lastLoc] : []
   // 다른 열차로 바뀌었거나, 떠난 지 2분이 지났거나(판단할 측위 구간이 끝남), 30분을 넘게 기다렸다
@@ -1406,9 +1422,8 @@ function startWaitWatch(): void {
     if (done()) return
     seen.push(toFix(l))
     if (!departedAt || busy) return
-    const o = COORDS.find(c => c.name === stops[0])
-    const d = o ? missedAway(seen, o, COORDS.filter(c => stops.slice(1, 4).includes(c.name)), departedAt) : null
-    if (d != null) void missedTrain(d)
+    const d = origin.length ? missedAway(seen, origin, COORDS.filter(c => stops.slice(1, 4).includes(c.name)), departedAt) : null
+    if (d != null) void missedTrain(d, seen)
   })
   // 끄는 일은 타이머가 한다. 지하에서는 측위가 아예 안 와서, 측위를 받을 때 끄면 구독이 남았다.
   const g = locGen
@@ -1416,17 +1431,28 @@ function startWaitWatch(): void {
     if (g !== locGen) return clearInterval(t)
     if (!done()) return
     clearInterval(t)
-    log('wait gps off', no, seen.length)
+    // 마지막 측위가 역에서 얼마나 떨어졌는지 남긴다. '놓침' 기준을 실측으로 고치는 데 쓴다.
+    log('wait gps off', no, seen.length, ...(seen.length ? ['last', awayFrom(seen[seen.length - 1], origin), 'acc', Math.round(seen[seen.length - 1].acc)] : []))
     stopLocation()
   }, 5000)
 }
 
-async function missedTrain(d: number): Promise<void> {
+// 역의 승강장 좌표들. 환승역은 노선마다 다르다(platforms.json). 하나뿐이면 stations.json의 좌표.
+const PLATFORMS: Record<string, number[][]> = platforms.points
+const platformsOf = (name: string): { lat: number; lon: number }[] =>
+  PLATFORMS[name]?.map(([lat, lon]) => ({ lat, lon })) ?? COORDS.filter(c => c.name === name)
+const awayFrom = (f: WaitFix, pts: { lat: number; lon: number }[]): string =>
+  Math.round(Math.min(...pts.map(o => distanceM(f.lat, f.lon, o.lat, o.lon)))) + 'm'
+
+async function missedTrain(d: number, seen: WaitFix[]): Promise<void> {
   stopLocation()
   const snap = snapshot()
   // ponytail: 직선거리를 빠른 걸음으로 나눈다. 짧게 잡아 못 닿는 열차를 태우면 그 열차가 떠날 때 또 잡는다
   const walkSec = Math.round(d / 1.4)
-  log('missed by location', train!.trainNo, stops[0], Math.round(d) + 'm', 'walk', walkSec + 's')
+  // 판단에 쓴 측위들(떠나기 전후)을 남긴다. 오판을 가려내는 데 쓴다.
+  const pts = platformsOf(stops[0])
+  log('missed by location', train!.trainNo, stops[0], Math.round(d) + 'm', 'walk', walkSec + 's', '|',
+    seen.slice(-4).map(f => `${awayFrom(f, pts)}/${Math.round(f.acc)}@${Math.round((f.t - departedAt) / 1000)}s`).join(' '))
   gone.add(train!.trainNo)
   stopPolling()
   walkUntil = Date.now() + walkSec * 1000
@@ -1450,6 +1476,7 @@ const noteLag = (ms: number): void => { if (ms > 0 && ms < 300_000) lags = [...l
 const feedLag = (): number => (lags.length ? Math.min(180_000, Math.max(10_000, [...lags].sort((a, b) => a - b)[Math.floor(lags.length / 2)])) : LAG_MS)
 // 한번 다음 역으로 넘긴 화면은, 같은 관측이 이어지는 동안 되돌리지 않는다. 출발 기록이 늦게 와 계산이 바뀌면 화면이 잠깐 뒤로 갔다.
 let aheadOf = ''
+let doorNoted = ''      // 내리실 문을 기록한 노선|하차역
 
 async function poll(gen: number, why = 'timer'): Promise<void> {
   if (gen !== pollGen || mode !== 'riding') return
@@ -1470,7 +1497,9 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         // 타기 전에 세 번 연속 없으면 열차번호가 바뀌었거나 잘못 잡은 것이다. 앱이 다시 고른다(두 번까지).
         if (misses >= 3 && autoRepicks < 2 && !fixes.length) {
           autoRepicks += 1
-          log('auto repick', autoRepicks)
+          // 고를 때부터 위치 피드에 없던 열차는 유령으로 보고 다시 고르지 않는다. 같은 열차를 두 번 더 태웠다(10-04 노원 7075).
+          if (train!.seen === false) gone.add(train!.trainNo)
+          log('auto repick', autoRepicks, train!.seen === false ? 'unseen' : '')
           stopPolling()
           // 열차번호가 바뀌었거나 잘못 잡았다. 원래 예정 시각에 가장 가까운 열차를 앱이 다시 태운다(리뷰 3라운드:
           // 이유 없이 목록을 띄우고 추적을 멈췄다). 같은 열차면 같은 열차를 다시 기다린다.
@@ -1693,10 +1722,13 @@ async function renderNow(): Promise<void> {
   // 두 정거장 안이면 신호가 끊겨도 하차 화면이 먼저다. 끊김 3분이 넘으면 '신호 끊김'이 '다음 역에서 내리세요'를
   // 가렸다(리뷰 3라운드). 추정이라고 적고 마지막 관측이 몇 분 전인지 붙인다.
   if (left <= 2) {
+    // 내리실 문은 하차역마다 한 번 남긴다. 실제 안내 방송과 맞춰 보는 데 쓴다.
+    const door = doorSide(leg().line, dest, train!.dest)
+    if (doorNoted !== `${leg().line}|${dest}`) { doorNoted = `${leg().line}|${dest}`; log('door', leg().line, dest, door ?? '정보 없음') }
     return show(S.alight({
       now, stopsLeft: left, dest, next: stops[guess.index + 1], arriveAt: legAt,
       note: note || undefined, then: trip!.legs[legIndex + 1]?.line, fast: xferHere()?.off ?? undefined,
-      door: doorSide(leg().line, dest, train!.dest) ?? '',
+      door: door ?? '',
       estimated: guess.estimated > 0 || guess.stale, refresh: refresh(), hint: hintNow(),
       seenMin: guess.stale ? Math.max(1, Math.round((now - (lastFix.seen ?? lastFix.at)) / 60_000)) : undefined,
     }))
@@ -2039,7 +2071,14 @@ if (import.meta.hot) {
 
 const APP = import.meta.env?.VITE_APP_NAME ?? 'G2P for Metro'
 const booting = () => S.loading(Date.now(), APP, '출발역 찾는 중')
-const started = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(full(booting())))
+let started = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(full(booting())))
+// 안경 메뉴에서 실행했을 때 1(invalid)이 오고 그 뒤 모든 화면이 실패했다(10-07). 같은 화면이 다른 실행에서는 성공했다.
+// 호스트가 아직 준비되지 않은 것으로 보고 1초 간격으로 세 번 더 시도한다.
+for (let i = 1; started !== 0 && i <= 3; i++) {
+  log('startup retry', i, started)
+  await new Promise<void>(r => later(r, 1000))
+  started = await bridge.createStartUpPageContainer(new CreateStartUpPageContainer(full(booting())))
+}
 log('startup', started, location.href)
 // 위치가 늦게 오면(실기기에서 최대 10초) 시작 화면이 오래 남는다. 그동안에도 스피너가 돈다.
 pageIsText = started === 0

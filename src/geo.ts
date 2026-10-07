@@ -41,14 +41,16 @@ export function nearest(
 //   1. 떠나기 전 마지막 측위가 역 밖이다(멀리서 골랐다). 승강장에서는 와이파이 측위로 역 65m 안이 나왔다(10-01 하계).
 //   2. 떠난 뒤 2분 안의 측위도 역 밖이고, 타고 갈 다음 역들 300m 안이 아니다(지상 구간이면 열차 안일 수 있다).
 //   3. 두 측위 사이를 걸어서 갈 수 있다. 열차 안 측위는 차량기지로 튀었다(10-01: 2.5km, 오차 67~91m).
+// origin은 그 역의 승강장 좌표들이다(환승역은 노선마다 다르다). 가장 가까운 것으로 잰다.
+// 10-04 노원: 이름당 좌표 하나(4호선)로 재서, 7호선 승강장에서 기다리던 사용자를 336m 밖으로 보고 타던 열차를 버렸다.
 // 반환: 떠난 뒤 역까지 거리(m). 아니면 null.
 export type WaitFix = { lat: number; lon: number; acc: number; t: number }
-export function missedAway(fixes: WaitFix[], origin: { lat: number; lon: number }, ahead: { lat: number; lon: number }[], departedAt: number): number | null {
+export function missedAway(fixes: WaitFix[], origin: { lat: number; lon: number }[], ahead: { lat: number; lon: number }[], departedAt: number): number | null {
   const good = fixes.filter(f => f.acc <= 80)
   const before = good.filter(f => f.t < departedAt).at(-1)
   const after = good.filter(f => f.t >= departedAt && f.t <= departedAt + 120_000).at(-1)
   if (!before || !after) return null
-  const away = (f: WaitFix) => distanceM(f.lat, f.lon, origin.lat, origin.lon)
+  const away = (f: WaitFix) => Math.min(...origin.map(o => distanceM(f.lat, f.lon, o.lat, o.lon)))
   const outside = (f: WaitFix) => away(f) >= Math.max(150, f.acc + 100)
   if (!outside(before) || !outside(after)) return null
   if (ahead.some(s => distanceM(after.lat, after.lon, s.lat, s.lon) < 300)) return null

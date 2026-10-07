@@ -46,21 +46,42 @@ test('고른 열차가 떠난 뒤에도 역 밖에 있었으면 놓친 것으로
   const far = { lat: 37.6354525955175, lon: 127.06484040511386 }   // 10-03 16:40 하계에서 295m
   const before = { ...far, acc: 40, t: dep - 60_000 }
   // 고를 때 295m(오차 40m), 떠난 뒤 30초에도 거기 → 놓쳤다
-  const d1 = missedAway([before, { ...far, acc: 40, t: dep + 30_000 }], 하계, ahead7, dep)
+  const d1 = missedAway([before, { ...far, acc: 40, t: dep + 30_000 }], [하계], ahead7, dep)
   assert.ok(d1 != null && Math.round(d1) === 295, String(d1))
   // 10-02 21:07 홍대입구에서 198m(오차 59m) → 놓쳤다
   const hongdae = { lat: 37.558145078326845, lon: 126.92517378318394 }
-  assert.ok(missedAway([{ ...hongdae, acc: 59, t: dep - 90_000 }, { ...hongdae, acc: 59, t: dep + 25_000 }], 홍대, [at('신촌')], dep) != null)
+  assert.ok(missedAway([{ ...hongdae, acc: 59, t: dep - 90_000 }, { ...hongdae, acc: 59, t: dep + 25_000 }], [홍대], [at('신촌')], dep) != null)
   // 떠나기 전에 승강장(역 근처)에 닿았다 → 탔을 수 있다
-  assert.equal(missedAway([before, { ...하계, acc: 30, t: dep - 10_000 }, { ...far, acc: 40, t: dep + 30_000 }], 하계, ahead7, dep), null)
+  assert.equal(missedAway([before, { ...하계, acc: 30, t: dep - 10_000 }, { ...far, acc: 40, t: dep + 30_000 }], [하계], ahead7, dep), null)
   // 떠난 뒤 측위가 역 근처 → 탔을 수 있다
-  assert.equal(missedAway([before, { ...하계, acc: 30, t: dep + 30_000 }], 하계, ahead7, dep), null)
+  assert.equal(missedAway([before, { ...하계, acc: 30, t: dep + 30_000 }], [하계], ahead7, dep), null)
   // 떠난 뒤 측위가 없거나, 오차가 크거나, 2분이 지난 뒤의 것이면 판단하지 않는다
-  assert.equal(missedAway([before], 하계, ahead7, dep), null)
-  assert.equal(missedAway([before, { ...far, acc: 400, t: dep + 30_000 }], 하계, ahead7, dep), null)
-  assert.equal(missedAway([before, { ...far, acc: 40, t: dep + 200_000 }], 하계, ahead7, dep), null)
+  assert.equal(missedAway([before], [하계], ahead7, dep), null)
+  assert.equal(missedAway([before, { ...far, acc: 400, t: dep + 30_000 }], [하계], ahead7, dep), null)
+  assert.equal(missedAway([before, { ...far, acc: 40, t: dep + 200_000 }], [하계], ahead7, dep), null)
   // 다음 역(공릉) 근처면 열차 안일 수 있다(지상 구간)
-  assert.equal(missedAway([before, { ...at('공릉'), acc: 30, t: dep + 90_000 }], 하계, ahead7, dep), null)
+  assert.equal(missedAway([before, { ...at('공릉'), acc: 30, t: dep + 90_000 }], [하계], ahead7, dep), null)
   // 걸어서 못 가는 거리로 튀었다(10-01: 열차 안 측위가 수 km 떨어진 한 점으로 잡혔다, 오차 67m. 좌표는 예시) → 판단하지 않는다
-  assert.equal(missedAway([before, { lat: 37.6129, lon: 127.1033, acc: 67, t: dep + 60_000 }], 하계, ahead7, dep), null)
+  assert.equal(missedAway([before, { lat: 37.6129, lon: 127.1033, acc: 67, t: dep + 60_000 }], [하계], ahead7, dep), null)
+})
+
+// 10-04 노원: 사용자는 7호선 승강장 근처(7호선 좌표 69m)에서 9분을 기다렸다. 4호선 좌표로만 재면 227m 밖이다.
+test('환승역은 노선별 승강장 좌표 가운데 가장 가까운 것으로 잰다', () => {
+  const dep = 1_000_000
+  const line4 = { lat: 37.65627, lon: 127.063276 }, line7 = { lat: 37.654836, lon: 127.060462 }
+  const me = { lat: 37.65507868760056, lon: 127.06118650826708 }
+  const fixes = [{ ...me, acc: 24, t: dep - 540_000 }, { ...me, acc: 24, t: dep + 20_000 }]
+  assert.ok(missedAway(fixes, [line4], [], dep) != null)          // 고치기 전: 놓친 것으로 봤다
+  assert.equal(missedAway(fixes, [line4, line7], [], dep), null)  // 고친 뒤: 역 안
+})
+
+// 대가: 10-02 홍대입구는 실제로 놓쳤지만, 그 위치가 경의중앙선·공항철도 승강장 좌표에서 144~157m라 이제 판단하지 않는다.
+// 타던 열차를 버리는 오판(노원)이 '못 탔으면 다음 열차' 탭 한 번보다 훨씬 비싸다.
+test('다른 노선 승강장 근처면 놓쳤어도 판단하지 않는다(10-02 홍대입구)', () => {
+  const dep = 1_000_000
+  const hongdae = { lat: 37.558145078326845, lon: 126.92517378318394 }
+  const fixes = [{ ...hongdae, acc: 59, t: dep - 90_000 }, { ...hongdae, acc: 59, t: dep + 25_000 }]
+  const line2 = { lat: 37.55679, lon: 126.923708 }, gyeongui = { lat: 37.557641, lon: 126.926683 }, arex = { lat: 37.557438, lon: 126.926715 }
+  assert.ok(missedAway(fixes, [line2], [], dep) != null)
+  assert.equal(missedAway(fixes, [line2, gyeongui, arex], [], dep), null)
 })
