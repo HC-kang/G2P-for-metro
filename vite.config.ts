@@ -14,7 +14,10 @@ export default defineConfig({
       server.middlewares.use('/__gps', (_req, res) => {
         res.setHeader('Content-Type', 'application/json')
         res.setHeader('Cache-Control', 'no-store')
-        try { res.end(readFileSync('.dev/gps.json', 'utf8')) } catch { res.statusCode = 404; res.end('{}') }
+        // {"delay": ms}면 그만큼 늦게 준다. 실기기는 위치를 받는 데 1~10초 걸린다(앱 시작 직후 화면 경합 재현용).
+        let body = '{}', delay = 0
+        try { body = readFileSync('.dev/gps.json', 'utf8'); delay = Number(JSON.parse(body).delay) || 0 } catch { res.statusCode = 404 }
+        setTimeout(() => res.end(body), delay)
       })
       // 모사 실시간 API. /__api/position/<노선> → .dev/position.json, /__api/arrival/<역> → .dev/arrival.json
       // 앱은 개발 모드 ?api=dev 일 때만 워커 대신 이것을 읽는다. 열차 이탈처럼 실제로는 못 만드는 상황을 만든다.

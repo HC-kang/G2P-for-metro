@@ -71,6 +71,24 @@ function every(fn: () => void, ms: number): ReturnType<typeof setInterval> {
 }
 
 const bridge = await waitForEvenAppBridge()
+// 개발 모드 ?upgradeDelay=ms: 실기기의 느린 BLE 응답을 흉내 낸다. 텍스트 갱신이 그만큼 늦게 호스트에 닿는다.
+// 시뮬레이터는 응답이 빨라 화면 경합(옛 갱신이 새 목록을 덮음, 10-07·10-08)이 저절로 나지 않는다. 배포본은 타지 않는다.
+const UPGRADE_DELAY = import.meta.env?.DEV ? Number(new URLSearchParams(location.search).get('upgradeDelay')) || 0 : 0
+// 실기기처럼 목록 페이지가 떠 있으면 본문('main') 갱신은 실패를 돌려준다. 시뮬레이터는 이때도 성공을 돌려준다.
+if (UPGRADE_DELAY) {
+  let textPage = true
+  const rb = bridge.rebuildPageContainer.bind(bridge)
+  bridge.rebuildPageContainer = async c => {
+    const ok = await rb(c)
+    if (ok) textPage = !!c.textObject?.some(t => t.containerName === 'main')
+    return ok
+  }
+  const up = bridge.textContainerUpgrade.bind(bridge)
+  bridge.textContainerUpgrade = async c => {
+    await new Promise(r => setTimeout(r, UPGRADE_DELAY))
+    return c.containerName === 'main' && !textPage ? false : up(c)
+  }
+}
 
 // 폰이 잠기거나 앱이 뒤로 가는 순간을 남긴다. 그림자 타이머가 도는 구간이 이때부터다.
 // 가려질 때 기록을 저장하고 모아 둔 로그를 보낸다. 그 뒤에 앱이 끝나도 다음 실행에서 보낼 수 있다.
@@ -144,8 +162,11 @@ let showFailNoted = 0
 let lastWritten = ''
 let writes = 0, writeBytes = 0, allWrites = 0, allBytes = 0
 
+// 페이지를 새로 만들 때마다 오른다. 텍스트 갱신을 기다리는 사이에 다른 페이지가 섰는지 가린다.
+let pageGen = 0
 // 반환값을 확인한다. tiro는 이것을 빼먹어 화면이 멈췄다.
 async function show(content: string): Promise<void> {
+  const gen = pageGen
   if (Date.now() < confirmUntil) {
     const ls = content.split('\n')
     ls[ls.length - 1] = `  ${CONFIRM}`
@@ -157,8 +178,12 @@ async function show(content: string): Promise<void> {
     // 매초 도는 길이다. 여기서 log를 부르면 1초마다 한 줄이 쌓이고 워커로도 날아간다.
     const up = await bridge.textContainerUpgrade(new TextContainerUpgrade({ containerID: 1, containerName: 'main', content }))
     if (up) { lastWritten = content; writes += 1; writeBytes += S.bytes(content); return }
+    // 기다리는 사이에 목록이 섰다. 갱신이 실패한 까닭이 그것이다. 옛 화면으로 목록을 덮지 않는다
+    // (10-07·10-08: 시작 틱의 '출발역 찾는 중' 갱신이 출발역 목록을 덮고 그대로 멈췄다).
+    if (gen !== pageGen) return
     log('upgrade false, rebuild', S.bytes(content))
   }
+  pageGen += 1
   listHead = null
   const ok = await bridge.rebuildPageContainer(new RebuildPageContainer(full(content)))
   pageIsText = !!ok
@@ -184,6 +209,10 @@ async function show(content: string): Promise<void> {
 let listHead: (() => string) | null = null
 
 async function showList(items: string[], head?: () => string): Promise<boolean> {
+  // 틱이 옛 텍스트 화면을 더 갱신하지 않게 먼저 끊는다. 이미 보낸 갱신은 show가 세대로 거른다.
+  pageGen += 1
+  current = null
+  listHead = null
   const fitted = S.fitsAll(items) ? items : S.fitItems(items)
   let ok = await bridge.rebuildPageContainer(new RebuildPageContainer(listOf(fitted, head?.())))
   if (!ok && head) {

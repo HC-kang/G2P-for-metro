@@ -31,6 +31,27 @@ shot(){ curl -s -m 5 -o "$SHOTS/$1.png" $S/api/screenshot/glasses; echo "  [$1]"
 webshot(){ curl -s -m 5 -o "$SHOTS/$1.png" $S/api/screenshot/webview; echo "  [$1 phone]"; }
 enc(){ python3 -c "import urllib.parse,sys;print(urllib.parse.quote(sys.argv[1]))" "$1"; }
 # launch "도착지1,도착지2" [추가 쿼리]
-launch(){ pkill -f "automation-port 9898" 2>/dev/null; sleep 1; nohup npx evenhub-simulator --automation-port 9898 "http://localhost:5173/?gps=dev&api=dev&host=ios&dests=$(enc "$1")${2:+&$2}" > /tmp/metro-sim.log 2>&1 & sleep 9; }
+# 사용자 화면을 가리지 않는다(사용자 요청 2026-10-08): 띄우기 전 맨 앞 앱을 기억하고, 창이 생기는 즉시
+# 오른쪽 아래 구석으로 작게 보낸 뒤 그 앱을 다시 앞으로 가져온다. SIM_FRONT=1이면 예전처럼 앞에 둔다.
+# 창은 둘이다(글라스 576x360, 폰 600x800). 크기는 줄지 않는다. 둘 다 화면 밖으로 밀고 오른쪽 아래 SIM_PEEK 픽셀만 남긴다.
+# 가려져도 앱은 돈다(타이머가 약 1.4배 느려진다, 2026-10-08 실측). 글라스 스크린샷은 창과 무관하게 찍힌다.
+SIM_PEEK=${SIM_PEEK:-120}
+front(){ lsappinfo info -only bundleid "$(lsappinfo front)" 2>/dev/null | sed -n 's/.*="\(.*\)"/\1/p'; }
+tuck(){ osascript -e "tell application \"System Events\" to tell process \"evenhub-simulator\" to set position of every window to {$1 - $SIM_PEEK, $2 - $SIM_PEEK}" >/dev/null 2>&1; }
+screen(){ osascript -e 'tell application "Finder" to get bounds of window of desktop' 2>/dev/null | awk -F', ' '{print $3, $4}'; }
+launch(){
+  local app; app=$(front)
+  pkill -f "automation-port 9898" 2>/dev/null; sleep 1
+  nohup node_modules/@evenrealities/sim-darwin-arm64/bin/evenhub-simulator --automation-port 9898 "http://localhost:5173/?gps=dev&api=dev&host=ios&dests=$(enc "$1")${2:+&$2}" > /tmp/metro-sim.log 2>&1 &
+  if [ -z "$SIM_FRONT" ]; then
+    local i; for i in $(seq 1 12); do
+      osascript -e 'tell application "System Events" to exists window 1 of process "evenhub-simulator"' 2>/dev/null | grep -q true && break
+      sleep 0.25
+    done
+    tuck $(screen)
+    [ -n "$app" ] && [ "$app" != "com.evenrealities.simulator" ] && open -b "$app"
+  fi
+  sleep 8
+}
 dev(){ grep -a '\[device\]' /tmp/metro-dev.log; }
 consoleErrors(){ curl -s -m 3 $S/api/console | python3 -c 'import sys,json;print(sum(1 for m in json.load(sys.stdin)["entries"] if m["level"]=="error"))'; }
