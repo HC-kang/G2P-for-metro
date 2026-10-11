@@ -364,17 +364,43 @@ export function transfer(a: { now: number; station: string; from: string; to: st
 // 고른 열차가 아직 승강장에 오지 않았다. 기다리는 동안 실제 위치를 보여준다.
 // arriveAt: 조회 시각 기준 도착 예정(탭한 시각 기준이면 목록을 오래 볼수록 늦게 나왔다).
 // at: 열차가 지금 있는 곳('중계 출발 · 1정거장 전'). 주행 화면과 같은 표기다('현재'를 붙이지 않는다).
-export function waiting(a: { now: number; line: string; toward: string; at: string; away?: string; from: string; arriveAt: number; refresh: Refresh; hint?: string }): string {
+// ahead: 이 구간의 하차역. 승강장에서 미리 알려야 그쪽 칸으로 가서 탄다(사용자 요청 10-11).
+//   then: 갈아탈 노선. off: 빠른환승 칸-문(내릴 위치 = 지금 탈 위치, 같은 열차·같은 방향이라 번호가 같다). door: 내리실 문.
+//   문을 모르면 대기 화면에서는 줄을 두지 않는다. '정보 없음'은 하차 화면에서 말한다.
+export function waiting(a: {
+  now: number; line: string; toward: string; at: string; away?: string; from: string; arriveAt: number; refresh: Refresh; hint?: string
+  ahead?: { station: string; then?: string; off?: string | null; door?: '왼쪽' | '오른쪽' | null }
+}): string {
   const eta = a.arriveAt - a.now >= 30_000
     ? `${hhmm(a.arriveAt)} 도착 · 약 ${minsTo(a.arriveAt, a.now)}분`
     : `곧 도착`
-  return page([
+  const build = (more: string[]) => page([
     head(a.now, context(a.now, a.line, a.toward)), '',
     `${PAD}${comingTitle(a.toward)}`, '',
     // 아직 위치를 못 받았으면 '위치 확인 중'이라고 쓰고 스피너를 붙인다.
     ...(a.at ? (a.away ? joinOrSplit(a.at, a.away) : [`${PAD}${a.at}`]) : [`${PAD}위치 확인 중  ${spin(a.now)}`]),
     `${PAD}${eta}`,
+    ...(more.length ? ['', ...more] : []),
   ], [`${PAD}${refreshLine(a.refresh)}`, ...(a.hint ?? '탭: 메뉴').split('\n').map(h => `${PAD}${h}`)])
+  const x = a.ahead
+  if (!x) return build([])
+  const stop = x.then ? joinOrSplit(`${x.station} 하차`, `${x.then} 환승`) : [`${PAD}${x.station} 하차`]
+  // '하차·환승'과 '승차·문'은 줄을 나눈다. '우이신설선 환승 · 10-4 승차'로 섞이면 갈아탈 열차의 칸으로 읽힌다.
+  // 갈아타지 않고 칸-문도 없으면(목적지) 하차역과 내리실 문을 한 줄로 잇는다.
+  const lines = (door: boolean): string[] => {
+    const d = door && x.door ? `내리실 문 ${x.door}` : ''
+    if (!x.then && !x.off) return d ? joinOrSplit(`${x.station} 하차`, d) : stop
+    const parts = [x.off ? `${x.off} 승차` : '', d].filter(Boolean)
+    return [...stop, ...(parts.length === 2 ? joinOrSplit(parts[0], parts[1]) : parts.map(p => `${PAD}${p}`))]
+  }
+  // 이름이 길어 넘치면 덜어낸다: 내리실 문 → 칸-문 줄 → 하차역 줄. 버린 시도의 줄바꿈은 세지 않는다.
+  const widows = layStats.widows
+  for (const more of [lines(true), lines(false), stop]) {
+    const out = build(more)
+    if (out.split('\n').length <= MAX_LINES) return out
+    layStats.widows = widows
+  }
+  return build([])
 }
 
 // 관측이 끊겼다. 추정임을 화면이 스스로 말한다.

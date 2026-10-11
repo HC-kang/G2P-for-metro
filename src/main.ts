@@ -657,6 +657,12 @@ const xferHere = () => {
   const next = trip?.legs[legIndex + 1]
   return next && stops.length > 1 ? fastTransfer(stops[stops.length - 1], leg().line, stops[stops.length - 2], next.line, next.stops[1] ?? '') : null
 }
+// 기다리는 화면의 하차 안내(승강장에서 미리 그쪽 칸으로 가서 타게, 사용자 요청 10-11).
+// 이 구간의 하차역, 갈아탈 노선, 빠른환승 칸-문(내릴 위치가 곧 탈 위치), 내리실 문.
+const legAhead = () => {
+  const end = stops[stops.length - 1]
+  return { station: end, then: trip?.legs[legIndex + 1]?.line, off: xferHere()?.off ?? null, door: doorSide(leg().line, end, train?.dest) }
+}
 let xferArrivedAt = 0, xferWalkSec = TRANSFER_WALK_SEC
 // 환승 화면에서 '지금 다음 열차 찾기'를 누르면 이미 승강장 가까이 왔다고 본다.
 const TRANSFER_TAP_WALK_SEC = 120   // 60초였다. 내리자마자 누르면 닿지 못할 열차를 태웠다(리뷰 2라운드)
@@ -1413,11 +1419,12 @@ async function board(a: Arrival, keepEta = false): Promise<void> {
   menuOpen = false
   mode = 'riding'
   log('boarded', a.trainNo, leg().line, 'eta', a.etaSec, 'age', a.ageSec)
+  { const x = legAhead(); log('ahead', x.station, x.then ?? '-', x.off ?? '-', x.door ?? '-') }
   const r = ride ??= { at: Date.now(), used, writes: allWrites + writes, bytes: allBytes + writeBytes }
   void logBattery('boarded').then(b => { r.battery ??= b })
   await show(S.waiting({
     now: Date.now(), line: leg().line, toward: a.dest || a.toward,
-    at: '', from: stops[0], arriveAt: boardedAt + a.etaSec * 1000, refresh: refresh(), hint: hintNow(),
+    at: '', from: stops[0], arriveAt: boardedAt + a.etaSec * 1000, refresh: refresh(), hint: hintNow(), ahead: legAhead(),
   }))
   stopPolling()
   misses = 0
@@ -1731,7 +1738,7 @@ async function renderNow(): Promise<void> {
         at: approach ? `${approach} ${S.statusWord(approachStatus)}`.trim() : '',
         away: n > 0 && approach !== stops[0] ? `${n}정거장 전` : undefined,
         from: stops[0], arriveAt: observed || boardedAt + train!.etaSec * 1000,
-        refresh: refresh(), hint: hintNow(),
+        refresh: refresh(), hint: hintNow(), ahead: legAhead(),
       }))
     }
     return show(S.loading(now, '열차를 찾는 중', `${train!.trainNo}번 위치가 아직 안 보입니다`, '탭: 메뉴\n더블탭: 처음으로', leg().line))

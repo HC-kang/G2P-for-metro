@@ -288,6 +288,9 @@ test('모든 역 이름으로 그린 모든 화면이 한도를 지킨다', asyn
     ok(S.alight({ now: T, stopsLeft: 1, dest: n, next: n, arriveAt: T + 120_000, refresh: R, door: '오른쪽' }), `alight1 문 ${n}`)
     ok(S.alight({ now: T, stopsLeft: 2, dest: n, next: n, arriveAt: T + 240_000, then: line, fast: '10-4', refresh: R, estimated: true, seenMin: 12, door: '' }), `alight 끊김 빠른환승 문 ${n}`)
     ok(S.arrived(T, n), `arrived ${n}`)
+    // 기다리는 화면의 하차 안내: 긴 역 이름, 두 줄 안내(놓침 되돌리기)에서도 한도를 지킨다
+    ok(S.waiting({ now: T, line, toward: n, at: `${n} 출발`, away: '2정거장 전', from: n, arriveAt: T + 180_000, refresh: R,
+      hint: '앞 열차를 놓쳐 바꿨습니다\n탭: 탔으면 되돌리기', ahead: { station: n, then: '우이신설선', off: '10-4', door: '오른쪽' } }), `waiting 하차 ${n}`)
     ok(S.transfer({ now: T, station: n, from: line, to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n, note: '반대 방향' }), `transfer ${n}`)
     ok(S.transfer({ now: T, station: n, from: '9호선', to: '9호선', toward: n, rest: 23, finalAt: T + 3_000_000, finalDest: n }), `transfer 반대 ${n}`)
     // 빠른환승 칸-문을 붙여도 한도·들여쓰기·한 어절 줄 규칙을 지킨다
@@ -399,4 +402,20 @@ test('빠른환승: 하차 화면은 환승 노선 옆에, 환승 화면은 방�
   assert.ok(on.includes('6호선 석계 방면') && on.includes('1-1 승차'), on)
   // 자료가 없으면 예전 그대로
   assert.ok(!S.alight({ now: T, stopsLeft: 2, dest: '논현', next: '학동', arriveAt: T + 240_000, then: '신분당선', refresh: R }).includes('빠른환승'))
+})
+
+// 승강장에서 기다릴 때 하차역과 탈 칸-문, 내리실 문을 미리 알린다. 그래야 그쪽으로 가서 탄다(사용자 요청 10-11).
+test('waiting은 이 구간의 하차역, 빠른환승 칸-문, 내리실 문을 보여준다', () => {
+  const base = { now: T, line: '7호선', toward: '석남', at: '수락산 출발', away: '4정거장 전', from: '하계', arriveAt: T + 280_000, refresh: R }
+  const xfer = S.waiting({ ...base, ahead: { station: '태릉입구', then: '6호선', off: '1-1', door: '오른쪽' } })
+  assert.ok(xfer.includes('태릉입구 하차 · 6호선 환승'), xfer)
+  assert.ok(xfer.includes('1-1 승차 · 내리실 문 오른쪽'), xfer)
+  ok(xfer, 'waiting 환승')
+  // 목적지: 빠른하차 자료가 없으면 내리실 문만. 문도 모르면 하차역만(대기 화면에서는 '정보 없음'을 쓰지 않는다)
+  const end = S.waiting({ ...base, ahead: { station: '청담', door: '왼쪽' } })
+  assert.ok(end.includes('청담 하차 · 내리실 문 왼쪽') && !end.includes('승차'), end)
+  const bare = S.waiting({ ...base, ahead: { station: '청담' } })
+  assert.ok(bare.includes('청담 하차') && !bare.includes('내리실 문'), bare)
+  // 안내가 없으면 예전과 같다
+  assert.ok(!S.waiting(base).includes('하차'))
 })
