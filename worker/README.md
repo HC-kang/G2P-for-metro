@@ -10,10 +10,12 @@
 | `GET /arrival/{역명}` | `realtimeStationArrival/0/40/{역명}` |
 | `POST /log` | 기기 로그를 D1 `logs`에 저장(개발 기간). `x-metro-kind: live|trail`, `x-metro-session` |
 
+위치 응답에는 거르기 전 노선 전체 열차 수가 `x-metro-feed`로 붙는다(0 = 피드가 빔, -1 = 읽지 못함).
 응답에는 오늘(KST) 서울 API를 실제로 부른 횟수가 `x-metro-used`로 붙는다. 캐시 적중은 세지 않는다. 950건이 되면 429로 막는다.
 
 그 밖의 경로는 404다. 임의 URL을 중계하지 않는다.
-모든 요청에 `x-metro-token` 헤더가 필요하다. 없거나 틀리면 403이다.
+모든 요청에 `x-metro-token` 헤더가 필요하다. `METRO_TOKEN` 또는 `METRO_TOKEN_NEXT`와 같아야 한다. 없거나 틀리면 403이다.
+토큰을 바꿀 때는 새 값을 `METRO_TOKEN_NEXT`에 넣고 새 빌드를 깐 뒤 옛 값을 정리한다. 설치된 앱이 끊기지 않는다(2026-10-12: 맥미니로 옮기며 옛 `.env.local`이 없어 새 토큰을 NEXT로 넣었다).
 
 ## 배포
 

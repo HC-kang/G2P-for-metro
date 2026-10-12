@@ -19,7 +19,7 @@ import { COORDS, NAMES, transferLines, arrivalName, DATA_DATE } from './stations
 import platforms from './platforms.json' with { type: 'json' }
 import { plan, routeChoices, continued, etaFromPosition, approaching, fastTransfer, doorSide, locate, legEta, hops, paceMs, reaches, approachEta, leftBefore, LAG_MS, stopsLeft, deviation, DEFAULT_PACE_MS, type Plan, type Fix, type Deviation } from './route.ts'
 import { nearest, distanceM, missedAway, MAX_ACCURACY_M, type Near, type WaitFix } from './geo.ts'
-import { arrivals, positions, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
+import { arrivals, positions, positionFeed, remoteLog, flushLog, endLog, sendTrail, REPORTING, SESSION, setServerUsedListener, setUnsentListener, failingFor, setReporting, setRequestGuard, ApiError, ConfigError, type Arrival } from './api.ts'
 import { lineShort, lineColor } from './lines.ts'
 import * as S from './screen.ts'
 import { closest, doubleTapAction, doubleTapHint, type DoubleTapState } from './controls.ts'
@@ -647,6 +647,11 @@ let pollGen = 0
 // 연속으로 열차를 못 찾은 횟수. 한 번 놓친 것으로 오류 화면을 띄우지 않는다.
 let misses = 0
 let heardAt = 0   // 고른 열차를 피드에서 마지막으로 본(또는 추적을 시작한) 시각
+// 노선 위치 피드가 통째로 빈 때부터의 시각(0이면 정상). 고른 열차가 안 보이는 것과 다르다(10-12 출근: 7호선 14분).
+// 비어 있는 동안은 '못 찾음'을 세지 않는다(유령 판정·다시 고르기·10분 정지를 하지 않는다). 시각으로 추정해 안내를 잇는다.
+let feedDownAt = 0
+// 피드가 빈 채 출발 시각이 지나면 출발역을 떠났다고 보고 넣는 추정 기록. 첫 관측이 오면 지운다.
+const estFix = (station: string, at: number): Fix => ({ station, at, seen: at, status: 2, arr: at, first: 2, est: true })
 
 // 환승 1회에 걸리는 시간. 실측 전 추정값이다. 화면에는 '약'을 붙여 보여준다.
 const TRANSFER_MIN = 4
@@ -690,7 +695,7 @@ const FAST_POLL = !!import.meta.env?.DEV && new URLSearchParams(location.search)
 const MOCK_API = !!import.meta.env?.DEV && new URLSearchParams(location.search).get('api') === 'dev'
 function pollDelay(): number {
   if (FAST_POLL) return 5_000
-  if (misses >= 4) return POLL_SLOWEST_MS   // 고른 열차가 한동안 안 보인다. 아껴 가며 기다린다
+  if (misses >= 4 || feedDownAt) return POLL_SLOWEST_MS   // 고른 열차가 한동안 안 보이거나 피드가 비었다. 아껴 가며 기다린다
   return used >= 850 ? POLL_SLOWEST_MS : used >= 700 ? POLL_SLOW_MS : POLL_MS
 }
 const leg = () => trip!.legs[legIndex]
@@ -1280,7 +1285,12 @@ function pickCandidates(all: Arrival[], exclude?: string): Arrival[] {
 async function liveCandidates(all: Arrival[], exclude?: string): Promise<Arrival[]> {
   let list = pickCandidates(all, exclude)
   try {
-    const pos = await positions(leg().line)
+    const { list: pos, feed } = await positionFeed(leg().line)
+    // 노선 피드가 비었다. 후보가 피드에 없는 것은 열차 탓이 아니다. seen을 비워 둬야 유령으로 보지 않는다.
+    if (feed === 0) {
+      log('pick positions feed empty', leg().line, '/', list.length)
+      return list.filter(a => a.etaSec > -45).sort((a, b) => a.etaSec - b.etaSec).slice(0, 18)
+    }
     const byNo = new Map(pos.map(p => [p.trainNo, p]))
     const now = Date.now()
     let seen = 0
@@ -1428,6 +1438,7 @@ async function board(a: Arrival, keepEta = false): Promise<void> {
   }))
   stopPolling()
   misses = 0
+  feedDownAt = 0
   heardAt = Date.now()
   nextPollAt = Date.now()
   // 탭 핸들러 안에서는 busy라 poll이 조회를 건너뛴다. 실기기에서 첫 조회가 20초 늦었다. 핸들러가 끝난 직후에 돈다.
@@ -1522,12 +1533,36 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
       // 조회를 기다리는 사이에 사용자가 여정을 나가면 train·trip이 비워진다. 번호를 먼저 잡아 둔다
       // (10-01: 더블탭으로 나가는 순간 'null is not an object (trainNo)'와 '(legs)' 오류가 났다).
       const no = train!.trainNo
-      let me = (await positions(leg().line, no)).find(t => t.trainNo === no)
+      const got = await positionFeed(leg().line, no)
+      let me = got.list.find(t => t.trainNo === no)
       if (gen !== pollGen) return   // 기다리는 사이에 다른 흐름이 시작됐다
       lastPollFailed = false
       showFails = 0
       if (me) heardAt = Date.now()
-      if (!me) {
+      let wasEst = false
+      if (got.feed === 0 && !me) {
+        if (!feedDownAt) { feedDownAt = Date.now(); log('feed empty', leg().line, 'train', no, 'fixes', fixes.length) }
+        // 아직 관측이 없고 출발 예정이 지났으면 출발역을 떠났다고 본다. 그 뒤는 locate가 시각으로 민다.
+        const departAt = boardedAt + train!.etaSec * 1000
+        if (!fixes.length && Date.now() >= departAt + 30_000) {
+          fixes.push(estFix(stops[0], departAt))
+          if (!departedAt) departedAt = departAt
+          log('feed empty: estimate from', stops[0], 'dep', new Date(departAt).toTimeString().slice(0, 8))
+        }
+        // 피드가 끝내 안 돌아오면 이번 구간 도착 예정 10분 뒤에 멈춘다. 그 전에는 추정으로 안내한다.
+        const endAt = fixes.length ? legEta(stops, fixes, Date.now(), feedLag()) : departAt + (stops.length - 1) * DEFAULT_PACE_MS
+        if (Date.now() > Math.max(endAt, feedDownAt) + 10 * 60_000) {
+          return stopRide('feed empty past eta', '열차 위치를 받지 못합니다', '위치 정보가 끊겨 안내를 멈췄습니다')
+        }
+      } else if (got.feed > 0 || me) {
+        if (feedDownAt) { log('feed back', leg().line, 'after', Math.round((Date.now() - feedDownAt) / 1000) + 's', me ? 'seen' : 'missing'); feedDownAt = 0; heardAt = Date.now() }
+        // 추정 기록은 첫 관측이 오면 버린다. 관측이 추정을 이긴다.
+        // 추정으로 이미 떠났다고 본 열차다. '고르기 전에 떠난 열차'로 읽어 다시 고르면 안 된다(시뮬레이터 10-12).
+        if (me && fixes.some(f => f.est)) { fixes = fixes.filter(f => !f.est); misses = 0; wasEst = true }
+      }
+      if (!me && got.feed === 0) {
+        // 위에서 처리했다. 못 찾음을 세지 않는다.
+      } else if (!me) {
         misses += 1
         log('train not in feed', train!.trainNo, 'misses', misses)
         // 타기 전에 세 번 연속 없으면 열차번호가 바뀌었거나 잘못 잡은 것이다. 앱이 다시 고른다(두 번까지).
@@ -1559,7 +1594,7 @@ async function poll(gen: number, why = 'timer'): Promise<void> {
         misses = 0
         // 고르기 전에 이미 출발역을 떠난 열차다. 사용자는 이 열차에 없다. 가장 먼저 오는 열차로 앱이 바꾼다.
         // 도착 정보가 묵어서(10-01 출근: 3~4분) 앞서 간 열차를 태웠고, 전 구간이 앞서 나갔다.
-        if (!fixes.length && gone.size < 4 && leftBefore(stops, me, pickedAt)) {
+        if (!wasEst && !fixes.length && gone.size < 4 && leftBefore(stops, me, pickedAt)) {
           gone.add(train!.trainNo)
           log('picked train already left', train!.trainNo, me.station, S.statusWord(me.status), 'at', new Date(me.at).toTimeString().slice(0, 8),
             'picked', new Date(pickedAt).toTimeString().slice(0, 8))
@@ -1745,6 +1780,9 @@ async function renderNow(): Promise<void> {
   }
 
   const lastFix = fixes[fixes.length - 1]
+  // 피드가 비어 시각으로만 추정하는 중이다. '신호 끊김(마지막 관측 …)' 화면은 관측이 있었을 때의 말이라 쓰지 않는다.
+  const timeOnly = !!lastFix.est
+  if (timeOnly) guess = { ...guess, stale: false }
   if (guess.estimated > 0) aheadOf = lastFix.station
   else if (aheadOf === lastFix.station && lastFix.status === 2 && guess.index < stops.length - 2) guess = { ...guess, index: guess.index + 1, estimated: 1 }
   const left = stopsLeft(stops, stops[guess.index])
@@ -1765,7 +1803,7 @@ async function renderNow(): Promise<void> {
       now, stopsLeft: left, dest, next: stops[guess.index + 1], arriveAt: legAt,
       note: note || undefined, then: trip!.legs[legIndex + 1]?.line, fast: xferHere()?.off ?? undefined,
       door: door ?? '',
-      estimated: guess.estimated > 0 || guess.stale, refresh: refresh(), hint: hintNow(),
+      estimated: guess.estimated > 0 || guess.stale || timeOnly, refresh: refresh(), hint: hintNow(),
       seenMin: guess.stale ? Math.max(1, Math.round((now - (lastFix.seen ?? lastFix.at)) / 60_000)) : undefined,
     }))
   }
@@ -1785,11 +1823,11 @@ async function renderNow(): Promise<void> {
   // 지금 어디인지. 관측이면 전광판과 같은 말(진입·도착·출발), 추정이면 추정이라고 말한다.
   // 도착한 채 1분 반 넘게 서 있으면 '정차 중'이다(지연). 앞으로 밀지 않는다.
   const dwelling = guess.estimated === 0 && lastFix.status === 1 && now - lastFix.at > 90_000
-  const at = guess.estimated > 0
+  const at = guess.estimated > 0 || timeOnly
     ? { station: stops[guess.index], label: '부근 (추정)' }
     : { station: stops[guess.index], label: dwelling ? '정차 중' : S.statusWord(atStatus) || '통과' }
   await show(S.riding({
-    now, line: leg().line, note: note || undefined,
+    now, line: leg().line, note: note || (timeOnly ? '시각 추정' : undefined),
     at, refresh: refresh(),
     next: stops[guess.index + 1],
     legDest: dest, stopsLeft: left, paceMs: pace, legAt,

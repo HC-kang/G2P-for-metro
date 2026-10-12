@@ -235,7 +235,7 @@ export function stopsLeft(stops: string[], current: string): number {
 // at: 그 역에서 마지막 사건(진입·도착·출발)이 난 시각(피드의 recptnDt). seen: 그 상태를 마지막으로 다시 확인한 시각(폴링 시각).
 // at: 그 역의 마지막 상태(진입→도착→출발)가 바뀐 사건 시각. arr: 그 역을 처음 본 사건 시각(바뀌지 않는다).
 // first: 그 역을 처음 봤을 때의 상태(0 진입, 1 도착, 2 출발). stop: 그 역에 선(도착) 사건 시각. 달린 시간·정차 시간을 재는 데 쓴다.
-export type Fix = { station: string; at: number; seen?: number; status?: number; arr?: number; first?: number; stop?: number }   // epoch ms
+export type Fix = { station: string; at: number; seen?: number; status?: number; arr?: number; first?: number; stop?: number; est?: boolean }   // epoch ms. est: 피드가 비어 시각으로 넣은 추정 기록
 // 그 역에 선 때. 도착 기록을 봤으면 그 시각, 진입만 봤으면 곧(15초 뒤) 선 것으로 본다. 출발부터 봤으면 모른다.
 const ENTER_MS = 15_000
 const stoppedAt = (f: Fix): number | null =>

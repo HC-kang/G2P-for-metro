@@ -14,7 +14,7 @@ const cors = {
   'Access-Control-Allow-Origin': '*',
   'Access-Control-Allow-Headers': 'x-metro-token, content-type, x-metro-kind, x-metro-session',
   'Access-Control-Allow-Methods': 'GET, OPTIONS',
-  'Access-Control-Expose-Headers': 'x-metro-used',
+  'Access-Control-Expose-Headers': 'x-metro-used, x-metro-feed',
 }
 
 // 서울 실시간 API는 키 하나에 하루(KST) 1000건이다. 워커가 직접 센다.
@@ -45,15 +45,24 @@ async function countCall(env) {
 }
 
 // 앱이 쓰는 필드만 남긴다. 위치 응답은 노선 전체라 크다. train을 주면 그 열차만.
+// feed는 거르기 전 노선 전체의 열차 수다. 0이면 '열차가 없다'가 아니라 노선 위치 피드가 빈 것이다.
+// train으로 거른 응답만 보면 둘을 가를 수 없어서, 10-12 출근에 피드 장애를 '열차를 잃었다'로 읽고 주행을 멈췄다.
+// 목록 자체가 없으면(INFO-200 등) 0, 읽을 수 없으면 -1이다.
 const POS_FIELDS = ['subwayId', 'statnNm', 'trainNo', 'trainSttus', 'recptnDt', 'directAt', 'statnTnm']
-function slimPositions(body, train) {
+export function slimPositions(body, train) {
   let j
-  try { j = JSON.parse(body) } catch { return body }
+  try { j = JSON.parse(body) } catch { return { body, feed: -1 } }
   const list = j.realtimePositionList
-  if (!Array.isArray(list)) return body
+  if (!Array.isArray(list)) return { body, feed: j?.errorMessage?.code === 'INFO-200' || j?.code === 'INFO-200' ? 0 : -1 }
   const kept = (train ? list.filter(r => r.trainNo === train) : list)
     .map(r => Object.fromEntries(POS_FIELDS.map(k => [k, r[k]])))
-  return JSON.stringify({ realtimePositionList: kept })
+  return { body: JSON.stringify({ realtimePositionList: kept }), feed: list.length }
+}
+
+// 토큰을 바꿀 때 설치된 앱이 끊기지 않게 둘을 받는다. METRO_TOKEN_NEXT는 새 빌드용(2026-10-12, 다른 Mac에서 이어받으며 추가).
+const tokenOk = (request, env) => {
+  const t = request.headers.get('x-metro-token')
+  return !!t && (t === env.METRO_TOKEN || (!!env.METRO_TOKEN_NEXT && t === env.METRO_TOKEN_NEXT))
 }
 
 const reply = (body, status, extra = {}) =>
@@ -74,7 +83,7 @@ export default {
     // 받은 묶음은 D1에 저장한다(개발 기간). tail이 끊겨 있던 사이의 기록을 놓친 적이 있다(2026-09-26).
     //   x-metro-kind: live(10초 묶음) | trail("서버로 보내기")   x-metro-session: 앱버전-실행ID
     if (request.method === 'POST' && new URL(request.url).pathname === '/log') {
-      if (request.headers.get('x-metro-token') !== env.METRO_TOKEN) return reply('forbidden', 403)
+      if (!tokenOk(request, env)) return reply('forbidden', 403)
       const text = (await request.text()).slice(-30000)
       if (env.DB && text.trim()) {
         const kind = request.headers.get('x-metro-kind') === 'trail' ? 'trail' : 'live'
@@ -104,7 +113,7 @@ export default {
 
     // 토큰은 앱 번들 안에 있으므로 꺼낼 수 있다.
     // 우연한 남용을 막는 장치이지 인증이 아니다. 개인용이라 이 수준으로 충분하다.
-    if (request.headers.get('x-metro-token') !== env.METRO_TOKEN) return reply('forbidden', 403)
+    if (!tokenOk(request, env)) return reply('forbidden', 403)
 
     const upstream = `${BASE}/${env.SEOUL_RT_KEY}/json/${build(arg)}`
     const before = await usedToday(env)
@@ -127,8 +136,14 @@ export default {
     const used = hit ? before : await countCall(env)
     // 한도 소진은 HTTP 200으로 온다. tail에서 바로 보이게 남긴다.
     if (raw.includes('ERROR-337')) console.log('[quota] 일일 1000건 한도 소진')
-    const body = kind === 'position' ? slimPositions(raw, url.searchParams.get('train')) : raw
     const headers = { 'Content-Type': 'application/json; charset=utf-8' }
+    let body = raw
+    if (kind === 'position') {
+      const slim = slimPositions(raw, url.searchParams.get('train'))
+      body = slim.body
+      headers['x-metro-feed'] = String(slim.feed)
+      if (slim.feed === 0) console.log('[feed] empty position feed', arg)
+    }
     if (used >= 0) headers['x-metro-used'] = String(used)
     return reply(body, res.status, headers)
   },

@@ -234,7 +234,9 @@ const failed = (e: Error): Error => { failAt ||= Date.now(); return e }
 // 서울 API가 HTTP 200 본문으로 주는 일시 오류. 기다리면 낫는다. 10분 상한 안에서 다시 시도한다.
 const TRANSIENT = new Set(['ERROR-500', 'ERROR-600'])
 
-const get = async (path: string): Promise<unknown> => {
+// 응답 헤더를 함께 돌려준다. 위치 조회는 x-metro-feed(거르기 전 노선 전체 열차 수)를 읽는다.
+const get = async (path: string): Promise<unknown> => (await getWithHeaders(path)).body
+const getWithHeaders = async (path: string): Promise<{ body: unknown; headers: Headers | undefined }> => {
   beforeRequest(path)
   let res: Response
   // 응답이 끝내 안 오면 폴링이 멈춘 채 남는다. 10초에 끊는다(리뷰 3라운드: fetch에 타임아웃이 없었다).
@@ -262,12 +264,24 @@ const get = async (path: string): Promise<unknown> => {
   const code = String(b?.errorMessage?.code ?? b?.code ?? '')
   if (TRANSIENT.has(code)) throw failed(new Error(`서울 API 일시 오류 ${code}`))
   failAt = 0
-  return body
+  return { body, headers: res.headers }
 }
 
 // train을 주면 워커가 그 열차 한 대만 돌려준다. 노선 전체(수십 대)를 받던 것을 줄인다(통신량).
-export const positions = async (line: string, train?: string): Promise<TrainPos[]> =>
-  parsePositions(await get(`/position/${encodeURIComponent(line)}${train ? `?train=${encodeURIComponent(train)}` : ''}`))
+// feed는 노선 전체 열차 수다. 0이면 노선 위치 피드가 비었다(장애). -1이면 모른다(헤더 없는 옛 워커, 읽을 수 없는 응답).
+// 10-12 출근: 7호선 위치 피드가 14분 동안 비었는데 '고른 열차가 없다'로 읽고 유령 판정, 다시 고르기, 10분 뒤 주행 정지까지 갔다.
+export type PositionFeed = { list: TrainPos[]; feed: number }
+export const feedSize = (header: string | null | undefined, list: TrainPos[], filtered: boolean): number => {
+  const n = header == null || header === '' ? NaN : Number(header)
+  if (Number.isFinite(n) && n >= -1) return n
+  return filtered ? -1 : list.length
+}
+export async function positionFeed(line: string, train?: string): Promise<PositionFeed> {
+  const { body, headers } = await getWithHeaders(`/position/${encodeURIComponent(line)}${train ? `?train=${encodeURIComponent(train)}` : ''}`)
+  const list = parsePositions(body)
+  return { list, feed: feedSize(headers?.get?.('x-metro-feed'), list, !!train) }
+}
+export const positions = async (line: string, train?: string): Promise<TrainPos[]> => (await positionFeed(line, train)).list
 
 // 도착 API는 자기 표기로만 받는다. '공릉'은 데이터 없음, '공릉(서울산업대입구)'는 정상이다.
 // 빌드 때 만든 표에 없으면 예비 이름으로 한 번 더 시도한다.

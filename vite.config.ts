@@ -34,7 +34,12 @@ export default defineConfig({
         const kind = (req.url ?? '').split('/')[1]?.split('?')[0] ?? ''
         res.setHeader('Content-Type', 'application/json')
         res.setHeader('Cache-Control', 'no-store')
-        try { res.end(readFileSync(`.dev/${kind}.json`, 'utf8')) } catch { res.end('{}') }
+        try {
+          const body = readFileSync(`.dev/${kind}.json`, 'utf8')
+          // 워커처럼 노선 전체 열차 수를 붙인다. 빈 목록이면 0(피드 장애 재현).
+          if (kind === 'position') { try { const n = JSON.parse(body).realtimePositionList?.length; if (Number.isFinite(n)) res.setHeader('x-metro-feed', String(n)) } catch { /* 그대로 */ } }
+          res.end(body)
+        } catch { res.end('{}') }
       })
       // 모사 호스트 상태. .dev/host.json {"background": true}면 앱이 뒤로 간 것이다(src/devhost.ts, ?host=ios).
       server.middlewares.use('/__host', (_req, res) => {
